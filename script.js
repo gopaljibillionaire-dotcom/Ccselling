@@ -216,10 +216,6 @@ async function homeView() {
     sec("Special offers", data.offers), sec(cname ? `Popular in ${cname}` : "", data.country_collection, `#/shop?country=${state.country}`));
   const viewed = store.get("viewed", []);
   if (viewed.length) { try { const r = await api("/products/by-ids?ids=" + viewed.join(",")); wrap.append(sec("Recently viewed", r.items)); } catch { /* optional */ } }
-  if (cfg.tiers && cfg.tiers.length) wrap.append(h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", null, "Membership benefits")),
-    h("div", { class: "tiers" }, cfg.tiers.map((t) => h("div", { class: "panel" }, h("h3", null, t.name), h("p", { class: "small muted" }, t.threshold_minor ? `From ${money(t.threshold_minor)} lifetime spend` : "Free for everyone"), h("ul", { class: "small" }, (t.benefits || []).map((b) => h("li", null, b))))))));
-  const nl = newsletterForm();
-  wrap.append(h("section", { class: "section panel" }, h("div", { class: "row between wrap" }, h("div", null, h("h2", null, "Need help?"), h("p", { class: "muted" }, "Our support team answers order, payment and account questions.")), h("a", { class: "btn", href: "#/support" }, "Contact support"))), h("section", { class: "section panel" }, h("h2", null, "Newsletter"), nl));
   return wrap;
 }
 function newsletterForm() {
@@ -306,14 +302,14 @@ async function cartView() {
     return h("div", { class: "stack" }, h("h1", null, "Your cart"), h("div", { class: "panel" }, h("p", null, `You have ${g.reduce((s, i) => s + i.qty, 0)} item(s) saved on this device.`), h("p", { class: "muted small" }, "Sign in to see live prices, apply membership discounts and check out."), h("button", { class: "btn primary", type: "button", onclick: () => authDialog("login") }, "Sign in to continue")));
   }
   await refreshCart(); const c = state.cart; if (!c || !c.items.length) return empty("Your cart is empty.", h("a", { class: "btn primary", href: "#/shop" }, "Start shopping"));
-  const method = { v: "oxapay" }; const err = h("div", { class: "error-text", role: "alert" });
+  const method = { v: "plisio" }; const err = h("div", { class: "error-text", role: "alert" });
   const lines = c.items.map((i) => h("div", { class: "panel row" }, h("div", { style: "width:72px;height:72px;flex:none;border-radius:10px;overflow:hidden" }, safeImg(i.image, i.name)),
     h("div", { class: "grow" }, h("a", { href: "#/p/" + i.slug }, h("strong", null, i.name)), h("div", { class: "small muted" }, i.variant_label), h("div", null, money(i.unit_price_minor), " × ", i.qty), !i.available ? h("div", { class: "error-text" }, "Not enough stock for this quantity") : null),
     h("div", { class: "stack" }, h("div", { class: "qty" }, h("button", { type: "button", "aria-label": "Decrease", onclick: guard(async () => { await setQty(i.product_id, i.sku, i.qty - 1); route(); }) }, "−"), h("output", null, String(i.qty)), h("button", { type: "button", "aria-label": "Increase", onclick: guard(async () => { await setQty(i.product_id, i.sku, Math.min(20, i.qty + 1)); route(); }) }, "+")),
       h("button", { class: "btn sm danger", type: "button", onclick: guard(async () => { await setQty(i.product_id, i.sku, 0); route(); }) }, "Remove"))));
   const totals = h("div", { class: "panel stack" }, h("h3", null, "Order summary"), ...[["Subtotal", c.subtotal_minor], c.member_discount_minor ? ["Member discount", -c.member_discount_minor] : null, ["Tax", c.tax_minor]].filter(Boolean).map(([l, v]) => h("div", { class: "row between" }, h("span", { class: "muted" }, l), h("span", null, money(v)))), h("div", { class: "row between price" }, h("span", null, "Total"), h("span", null, money(c.total_minor))),
-    h("fieldset", { style: "border:0;padding:0;margin:0" }, h("legend", { class: "small muted" }, "Payment method"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", checked: true, onchange: () => (method.v = "oxapay") }), "Cryptocurrency (secure hosted checkout)"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", onchange: () => (method.v = "wallet") }), "Wallet balance")), err,
-    h("button", { class: "btn primary", type: "button", id: "payBtn", onclick: async (e) => { e.currentTarget.disabled = true; err.textContent = ""; try { const r = await api("/checkout", { method: "POST", body: { payment_method: method.v }, headers: { "Idempotency-Key": (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()) } }); state.cart = null; updateCartBadge(); const o = r.order; if (o.payment_url && /^https:\/\/([a-z0-9-]+\.)*oxapay\.com\//i.test(o.payment_url)) { toast("Redirecting to the secure payment page…"); location.assign(o.payment_url); } else { location.hash = "#/orders/" + o.number; } } catch (x) { err.textContent = x.message; e.currentTarget.disabled = false; } } }, "Place order & pay"),
+    h("fieldset", { style: "border:0;padding:0;margin:0" }, h("legend", { class: "small muted" }, "Payment method"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", checked: true, onchange: () => (method.v = "plisio") }), "Cryptocurrency (secure hosted checkout)"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", onchange: () => (method.v = "wallet") }), "Wallet balance")), err,
+    h("button", { class: "btn primary", type: "button", id: "payBtn", onclick: async (e) => { e.currentTarget.disabled = true; err.textContent = ""; try { const r = await api("/checkout", { method: "POST", body: { payment_method: method.v }, headers: { "Idempotency-Key": (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()) } }); state.cart = null; updateCartBadge(); const o = r.order; if (o.payment_url && /^https:\/\/([a-z0-9-]+\.)*plisio\.net\//i.test(o.payment_url)) { toast("Redirecting to the secure payment page…"); location.assign(o.payment_url); } else { location.hash = "#/orders/" + o.number; } } catch (x) { err.textContent = x.message; e.currentTarget.disabled = false; } } }, "Place order & pay"),
     h("p", { class: "small muted" }, "Your order is confirmed only after the payment provider verifies your payment with our server."));
   return h("div", { class: "stack" }, h("h1", null, "Your cart"), ...(c.problems && c.problems.length ? [h("div", { class: "panel error-text", role: "alert" }, c.problems.join(" · "))] : []), h("div", { class: "shop", style: "grid-template-columns:1fr" }, h("div", { class: "stack" }, lines), totals));
 }
@@ -336,13 +332,13 @@ async function orderView(number) {
 }
 
 /* ---------- Account ---------- */
-const TABS = [["overview", "Overview"], ["orders", "Orders"], ["wallet", "Wallet"], ["wishlist", "Wishlist"], ["rewards", "Rewards"], ["referrals", "Referrals"], ["support", "Support"], ["settings", "Settings"]];
+const TABS = [["overview", "Overview"], ["orders", "Orders"], ["wallet", "Wallet"], ["wishlist", "Wishlist"], ["rewards", "Rewards"], ["membership", "Membership"], ["referrals", "Referrals"], ["support", "Support"], ["settings", "Settings"]];
 async function accountView(tab) {
   if (!state.user) { setTimeout(() => authDialog("login"), 0); return empty("Sign in to see your account.", h("button", { class: "btn primary", type: "button", onclick: () => authDialog("login") }, "Sign in")); }
   const body = h("div", { class: "stack" });
   const tabs = h("nav", { class: "tabs", "aria-label": "Account sections" }, TABS.map(([k, l]) => h("a", { class: "pill", href: "#/account/" + k, "aria-current": String(k === tab) }, l)));
   const root = h("div", { class: "stack" }, h("div", { class: "row between" }, h("h1", null, "Hi, " + (state.user.name || "there").split(" ")[0]), h("button", { class: "btn sm", type: "button", onclick: logout }, "Sign out")), tabs, body);
-  const views = { overview: accOverview, orders: accOrders, wallet: accWallet, wishlist: accWishlist, rewards: accRewards, referrals: accReferrals, support: supportView, settings: accSettings };
+  const views = { overview: accOverview, orders: accOrders, wallet: accWallet, wishlist: accWishlist, rewards: accRewards, membership: accMembership, referrals: accReferrals, support: supportView, settings: accSettings };
   body.append(await (views[tab] || accOverview)()); return root;
 }
 async function accOverview() {
@@ -374,6 +370,12 @@ async function accWishlist() {
 async function accRewards() {
   const r = await api("/rewards"); return h("div", { class: "stack" }, h("div", { class: "balance" }, h("div", { class: "small muted" }, "Reward points"), h("div", { class: "amount" }, String(r.points_balance))),
     r.ledger.length ? h("div", { class: "panel table-wrap" }, h("table", null, h("thead", null, h("tr", null, ["Date", "Type", "Points", "Order"].map((x) => h("th", null, x)))), h("tbody", null, r.ledger.map((e) => h("tr", null, h("td", null, fmtDate(e.created_at)), h("td", null, e.type), h("td", null, String(e.points)), h("td", null, e.order_number || "—")))))) : empty("Points you earn on paid orders appear here."));
+}
+async function accMembership() {
+  const m = await api("/membership");
+  return h("div", { class: "stack" },
+    h("div", { class: "panel stack" }, h("h2", null, "Membership Tier"), h("div", { class: "row between" }, h("strong", null, m.tier.name), h("span", { class: "chip" }, `${m.points_balance} pts`)), h("div", { class: "progress", role: "progressbar", "aria-valuenow": String(m.progress_percent), "aria-valuemin": "0", "aria-valuemax": "100" }, h("span", { style: `width:${m.progress_percent}%` })), h("p", { class: "small muted" }, m.next_tier ? `${money(Math.max(0, m.next_tier.threshold_minor - m.lifetime_spend_minor), m.currency)} more to reach ${m.next_tier.name}` : "You have reached the highest tier."), h("ul", { class: "small" }, m.tier.benefits.map((b) => h("li", null, b)))),
+    h("div", { class: "panel" }, h("h3", null, "All Tiers"), h("div", { class: "grid cols-2" }, state.cfg.tiers.map((t) => h("div", { class: "panel" }, h("strong", null, t.name), h("p", { class: "small muted" }, t.threshold_minor ? `From ${money(t.threshold_minor)} lifetime spend` : "Free for everyone"), h("ul", { class: "small" }, (t.benefits || []).map((b) => h("li", null, b))))))));
 }
 async function accReferrals() {
   const r = await api("/referrals"); const link = h("input", { readonly: true, value: r.link, "aria-label": "Referral link" });
@@ -452,7 +454,7 @@ async function boot() {
   try {
     const [cfg, co, ca] = await Promise.all([api("/config"), api("/countries"), api("/categories")]);
     state.cfg = cfg; state.countries = co.countries; state.categories = ca.categories;
-    $("#brandName").textContent = cfg.brand_name || "Auralis"; $("#footBrand").textContent = cfg.brand_name || "Auralis"; document.title = (cfg.brand_name || "Auralis") + " - Premium marketplace";
+    $("#brandName").textContent = cfg.brand_name || "CCs shop"; $("#footBrand").textContent = cfg.brand_name || "CCs shop"; document.title = (cfg.brand_name || "CCs shop") + " - Premium marketplace";
     if (cfg.support_url) { const a = $("#supportLink"); a.href = cfg.support_url; a.target = "_blank"; a.rel = "noopener noreferrer"; }
     if (cfg.terms_url) { const a = $("#termsLink"); a.href = cfg.terms_url; a.classList.remove("hide"); a.target = "_blank"; a.rel = "noopener noreferrer"; }
     renderCatNav(); renderCountrySelect();
