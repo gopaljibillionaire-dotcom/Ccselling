@@ -941,28 +941,25 @@ def public_order(o: dict, pay: Optional[dict] = None) -> dict:
         d["payment_url"] = pay["payment_url"]
     return d
 
-
-async def plisio_request(method: str, path: str, params: Optional[dict] = None) -> dict:
-    """Call the Plisio API. Auth: 'api_key' query parameter."""
+async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
+    """Call the Plisio API. Auth: 'api_key' query parameter. Plisio ONLY uses GET."""
     if not settings.plisio_enabled:
         raise HTTPException(503, "Payments are not configured. Set PLISIO_API_KEY.")
     assert S.http is not None
     url = f"{settings.plisio_base_url}{path}"
     headers = {"Content-Type": "application/json"}
     
-    # Plisio API uses GET for invoices with query params, POST for others
+    # Plisio API uses GET for all operations with query params
     payload = params or {}
     payload["api_key"] = settings.plisio_api_key
     
     try:
-        if method == "GET":
-            r = await S.http.get(url, params=payload, headers=headers)
-        else:
-            r = await S.http.post(url, json=payload, headers=headers)
+        r = await S.http.get(url, params=payload, headers=headers)
         data = r.json()
     except (httpx.HTTPError, ValueError) as exc:
         log.error("Plisio request failed: %s", type(exc).__name__)
         raise HTTPException(502, "Payment provider is temporarily unavailable. Please try again.")
+    
     if r.status_code != 200 or data.get("status") == "error":
         log.error("Plisio error status=%s body=%s", r.status_code, json.dumps(data)[:300])
         raise HTTPException(502, "Payment provider rejected the request. Please contact support if this persists.")
@@ -975,7 +972,8 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
     # Plisio expects amount in standard units, not minor units
     amount = float(Decimal(amount_minor) / 100)
     
-    data = await plisio_request("GET", "/shops", {
+    # Plisio uses GET requests for invoice creation
+    data = await plisio_request("/shops", {
         "amount": amount,
         "currency": settings.default_currency,
         "order_name": description[:100],
@@ -1002,7 +1000,8 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
 async def provider_state(track_id: str) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", track_id):
         raise HTTPException(502, "Invalid provider reference")
-    return await plisio_request("GET", f"/operations/{track_id}")
+    # Plisio uses /operations/{id} to get transaction status
+    return await plisio_request(f"/operations/{track_id}")
 
 
 def map_provider_status(raw: str) -> str:
