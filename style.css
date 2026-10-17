@@ -1,4 +1,4 @@
-/* Auralis design system - dark-navy / cyan, mobile-first. Tokens first, components after. */
+/* CCs shop design system - dark-navy / cyan, mobile-first. Tokens first, components after. */
 :root {
   --bg: #070d1f; --bg2: #0b1430; --panel: rgba(18, 30, 62, .62); --panel-solid: #101a38; --line: rgba(120, 160, 230, .18);
   --text: #e8eefc; --muted: #9fb0d4; --accent: #22d3ee; --accent2: #3b82f6; --accent-ink: #04111f;
