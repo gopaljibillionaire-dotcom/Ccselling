@@ -77,15 +77,32 @@ class Settings:
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL"))
     rl_login_max: int = field(default_factory=lambda: _int("RL_LOGIN_MAX", 10))
     rl_login_window: int = field(default_factory=lambda: _int("RL_LOGIN_WINDOW_SECONDS", 900))
-    rl_api_max: int = field(default_factory=lambda: _int("RL_API_MAX", 100))
+    rl_api_max: int = field(default_factory=lambda: _int("RL_API_MAX", 300))
     rl_api_window: int = field(default_factory=lambda: _int("RL_API_WINDOW_SECONDS", 900))
     rl_sensitive_max: int = field(default_factory=lambda: _int("RL_SENSITIVE_MAX", 20))
     rl_sensitive_window: int = field(default_factory=lambda: _int("RL_SENSITIVE_WINDOW_SECONDS", 900))
-    rl_payment_max: int = field(default_factory=lambda: _int("RL_PAYMENT_MAX", 5))
-    rl_payment_window: int = field(default_factory=lambda: _int("RL_PAYMENT_WINDOW_SECONDS", 900))
+    rl_payment_max: int = field(default_factory=lambda: _int("RL_PAYMENT_MAX", 15))
+    rl_payment_window: int = field(default_factory=lambda: _int("RL_PAYMENT_WINDOW_SECONDS", 300))
     rl_reset_max: int = field(default_factory=lambda: _int("RL_RESET_MAX", 5))
     rl_reset_window: int = field(default_factory=lambda: _int("RL_RESET_WINDOW_SECONDS", 3600))
     search_max_query_length: int = field(default_factory=lambda: _int("SEARCH_MAX_QUERY_LENGTH", 80))
+
+    # --- Overload / capacity protection -------------------------------------
+    # Global concurrent-request cap per worker. Requests above the cap get 503 + Retry-After
+    # immediately instead of queueing and exhausting the dyno's memory. Sized for a 512MB
+    # dyno running 2 uvicorn workers: 40 concurrent per worker * 2 = ~80 total.
+    max_concurrent_requests: int = field(default_factory=lambda: _int("MAX_CONCURRENT_REQUESTS", 40))
+    # If a request waits longer than this for a slot, reject it rather than pile up.
+    overload_queue_seconds: int = field(default_factory=lambda: _int("OVERLOAD_QUEUE_SECONDS", 2))
+    # Hard cap on request body size (bytes). Uploads override this separately.
+    max_body_bytes: int = field(default_factory=lambda: _int("MAX_BODY_BYTES", 1_000_000))
+    # Cool-down applied when the payment provider returns 502/503: after N failures in the
+    # window, further invoice creation is short-circuited for `provider_cooldown_seconds`.
+    provider_breaker_threshold: int = field(default_factory=lambda: _int("PROVIDER_BREAKER_THRESHOLD", 5))
+    provider_breaker_window_seconds: int = field(default_factory=lambda: _int("PROVIDER_BREAKER_WINDOW_SECONDS", 120))
+    provider_cooldown_seconds: int = field(default_factory=lambda: _int("PROVIDER_COOLDOWN_SECONDS", 30))
+    # Timeout (seconds) applied to all outbound HTTP calls (Plisio, ImgBB).
+    outbound_timeout_seconds: int = field(default_factory=lambda: _int("OUTBOUND_TIMEOUT_SECONDS", 15))
 
     # --- Plisio (https://plisio.net/documentation) ---------------------------
     plisio_api_key: str = field(default_factory=lambda: _env("PLISIO_API_KEY"))
@@ -103,6 +120,7 @@ class Settings:
 
     # --- ImgBB ---------------------------------------------------------------
     imgbb_api_key: str = field(default_factory=lambda: _env("IMGBB_API_KEY"))
+    imgbb_upload_url: str = field(default_factory=lambda: _env("IMGBB_UPLOAD_URL", "https://api.imgbb.com/1/upload"))
     image_host_allowlist: List[str] = field(
         default_factory=lambda: _csv("IMAGE_HOST_ALLOWLIST", "i.ibb.co,ibb.co,image.ibb.co,i.ibb.co.com")
     )
@@ -120,6 +138,10 @@ class Settings:
     def imgbb_enabled(self) -> bool:
         return bool(self.imgbb_api_key)
 
+    @property
+    def port(self) -> int:
+        return _int("PORT", 8000)
+
     def effective_origins(self) -> List[str]:
         origins = set(self.allowed_origins)
         if self.public_app_url:
@@ -133,6 +155,12 @@ class Settings:
         problems: List[str] = []
         if self.cookie_samesite not in {"lax", "strict", "none"}:
             problems.append("COOKIE_SAMESITE must be lax, strict or none")
+        if self.max_concurrent_requests < 10:
+            problems.append("MAX_CONCURRENT_REQUESTS must be at least 10")
+        if self.overload_queue_seconds < 0:
+            problems.append("OVERLOAD_QUEUE_SECONDS cannot be negative")
+        if self.rl_payment_max < 1:
+            problems.append("RL_PAYMENT_MAX must be at least 1")
         if self.is_production:
             if len(self.app_secret) < 32:
                 problems.append("APP_SECRET must be set to a random string of at least 32 characters")
@@ -161,4 +189,4 @@ settings = load_settings() if os.environ.get("SKIP_CONFIG_VALIDATION") != "1" el
 logging.basicConfig(
     level=getattr(logging, settings.log_level, logging.INFO),
     format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
-)
+    )
