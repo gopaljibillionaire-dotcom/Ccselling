@@ -1016,19 +1016,60 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
         log.error("Plisio response missing invoice_url: %s", json.dumps(data)[:500])
         raise HTTPException(502, "Payment provider returned an unexpected response (missing payment URL).")
 
-    # Plisio serves the hosted checkout from payplisio.net 
-parsed = urlparse(invoice_url)
-host = (parsed.hostname or "").lower()
-allowed_hosts = ("plisio.net", "plisio.com", "payplisio.net")
-if parsed.scheme != "https" or not any(host == h or host.endswith("." + h) for h in allowed_hosts):
-    log.error("Plisio returned invalid invoice URL: %s", invoice_url)
-    raise HTTPException(502, "Payment provider returned an unexpected response (invalid URL).")
-    
-    pay = {"provider": "plisio", "purpose": purpose, "reference": reference, "order_id": order_id, "user_id": user["_id"],
-           "track_id": str(txn_id), "payment_url": invoice_url, "expected_minor": amount_minor,
-           "currency": settings.default_currency, "status": "pending", "verified_minor": None,
-           "verification": None, "sandbox": settings.plisio_sandbox, "created_at": utcnow(), "updated_at": utcnow(),
-           "history": [{"status": "pending", "at": utcnow(), "note": "invoice created", "actor": None}]}
+async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
+    await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
+
+    amount = float(Decimal(amount_minor) / 100)
+
+    data = await plisio_request("/invoices/new", {
+        "source_currency": settings.default_currency,
+        "source_amount": str(amount),
+        "order_name": description[:100],
+        "order_number": reference,
+        "email": user["email"],
+        "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook?json=true",
+        "success_invoice_url": f"{settings.public_app_url}/?order={reference}",
+        "fail_invoice_url": f"{settings.public_app_url}/?order={reference}&status=failed",
+        "expire_min": "60",
+    })
+
+    txn_id = data.get("txn_id") or data.get("id")
+    invoice_url = data.get("invoice_url") or data.get("url", "")
+
+    if not txn_id:
+        log.error("Plisio response missing txn_id: %s", json.dumps(data)[:500])
+        raise HTTPException(502, "Payment provider returned an unexpected response (missing transaction ID).")
+
+    if not invoice_url:
+        log.error("Plisio response missing invoice_url: %s", json.dumps(data)[:500])
+        raise HTTPException(502, "Payment provider returned an unexpected response (missing payment URL).")
+
+    # Validate the invoice URL host and scheme before trusting it
+    parsed = urlparse(invoice_url)
+    host = (parsed.hostname or "").lower()
+    allowed_hosts = ("plisio.net", "plisio.com", "payplisio.net")
+    if parsed.scheme != "https" or not any(host == h or host.endswith("." + h) for h in allowed_hosts):
+        log.error("Plisio returned invalid invoice URL: %s", invoice_url)
+        raise HTTPException(502, "Payment provider returned an unexpected response (invalid URL).")
+
+    pay = {
+        "provider": "plisio",
+        "purpose": purpose,
+        "reference": reference,
+        "order_id": order_id,
+        "user_id": user["_id"],
+        "track_id": str(txn_id),
+        "payment_url": invoice_url,
+        "expected_minor": amount_minor,
+        "currency": settings.default_currency,
+        "status": "pending",
+        "verified_minor": None,
+        "verification": None,
+        "sandbox": settings.plisio_sandbox,
+        "created_at": utcnow(),
+        "updated_at": utcnow(),
+        "history": [{"status": "pending", "at": utcnow(), "note": "invoice created", "actor": None}],
+    }
     await db()["payment_records"].insert_one(pay)
     return pay
 
