@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title>Auralis Admin</title>
+<title>CCs shop Admin</title>
 <style nonce="{{NONCE}}">
 :root{--bg:#070d1f;--panel:#101a38;--line:rgba(120,160,230,.2);--text:#e8eefc;--muted:#9fb0d4;--accent:#22d3ee;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;color-scheme:dark}
 *{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:radial-gradient(900px 500px at 90% -10%,rgba(59,130,246,.2),transparent),var(--bg);color:var(--text);min-height:100vh}
@@ -98,7 +98,7 @@ function resetLoginUi() { $("#mfaBox").classList.add("hide"); $("#loginBtn").tex
 $("#logoutBtn").addEventListener("click", go(async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} signedOut(); }));
 
 /* ---------- shell ---------- */
-const SECTIONS = [["overview", "Overview"], ["products", "Products"], ["fields", "Product fields"], ["categories", "Categories"], ["countries", "Countries"], ["inventory", "Inventory"], ["orders", "Orders"], ["payments", "Payments"], ["users", "Customers"], ["invites", "Invitations"], ["tiers", "Membership"], ["tickets", "Support"], ["reviews", "Reviews"], ["settings", "Settings"], ["audit", "Audit log"]];
+const SECTIONS = [["overview", "Overview"], ["guide", "Guide"], ["products", "Products"], ["fields", "Product fields"], ["categories", "Categories"], ["countries", "Countries"], ["inventory", "Inventory"], ["orders", "Orders"], ["payments", "Payments"], ["users", "Customers"], ["invites", "Invitations"], ["tiers", "Membership"], ["tickets", "Support"], ["reviews", "Reviews"], ["settings", "Settings"], ["audit", "Audit log"]];
 const isAdmin = () => ["admin", "superadmin"].includes(st.user.role);
 async function start() {
   $("#loginView").classList.add("hide"); $("#appView").classList.remove("hide"); $("#who").textContent = `${st.user.email} · ${st.user.role}`;
@@ -113,6 +113,33 @@ async function show(k) {
 
 /* ---------- views ---------- */
 const VIEWS = {};
+
+VIEWS.guide = async () => {
+  const guideText = `
+    <div class="panel">
+      <h2>Welcome to the CCs shop Admin Guide</h2>
+      <p>This panel allows you to manage every aspect of your store. Below is a breakdown of each section:</p>
+      <ul>
+        <li><strong>Overview:</strong> A quick dashboard showing your store's health, including total customers, active products, pending orders, and recent security events.</li>
+        <li><strong>Products:</strong> Add, edit, and manage your inventory. You can set prices, upload images, assign categories, and toggle products between Draft and Published.</li>
+        <li><strong>Product Fields:</strong> Create custom data fields for different product categories (e.g., "Size" for clothes, "RAM" for electronics). These fields appear dynamically when adding a product.</li>
+        <li><strong>Categories:</strong> Organize your store. You can create top-level categories and subcategories, set the order they appear, and enable/disable them.</li>
+        <li><strong>Countries:</strong> Manage the regions you ship to. Products can be filtered by country on the storefront.</li>
+        <li><strong>Inventory:</strong> Track stock levels. You can adjust stock manually, export/import CSV files for bulk updates, and view a log of every movement (sales, reserves, adjustments).</li>
+        <li><strong>Orders:</strong> View customer orders. You can update their fulfilment status (e.g., Shipped, Delivered) and issue refunds to the customer's wallet.</li>
+        <li><strong>Payments:</strong> Review all payment attempts. The system automatically verifies crypto payments (via Plisio) and credits the user's wallet. You can also re-trigger verification here if a payment is stuck.</li>
+        <li><strong>Customers:</strong> View registered users. You can suspend accounts, revoke active sessions, and view their reward history.</li>
+        <li><strong>Invitations:</strong> If the store is in Invite-Only mode, you can approve or reject applications here.</li>
+        <li><strong>Membership:</strong> Configure your VIP tiers (e.g., Basic, Gold, VIP). Set the spending thresholds required to reach a tier and the discount/reward multipliers they unlock.</li>
+        <li><strong>Support:</strong> Manage customer support tickets. You can reply directly to customers here.</li>
+        <li><strong>Settings:</strong> Update your store's branding (name, tagline), support URLs, and toggle Invite-Only mode.</li>
+        <li><strong>Audit Log:</strong> A secure, append-only history of every important action taken in the admin panel. This ensures accountability.</li>
+      </ul>
+    </div>
+  `;
+  return h("div", null, h("div", { class: "panel", innerHTML: guideText }));
+};
+
 VIEWS.overview = async () => {
   const s = await api("/admin/stats"); const c = s.currency; const tile = (l, v) => h("div", { class: "panel" }, h("div", { class: "muted small" }, l), h("div", { class: "stat" }, v));
   return h("div", null, h("div", { class: "grid" }, tile("Customers", s.customers_total), tile("Active sessions (30d)", s.customers_active), tile("Published products", s.products_published), tile("Low stock", s.low_stock), tile("Out of stock", s.out_of_stock), tile("Orders", s.orders_total), tile("Pending orders", s.orders_pending), tile("Completed orders", s.orders_completed), tile("Pending payments", s.payments_pending), tile("Verified revenue (net)", money(s.revenue_minor, c)), tile("Refunds", money(s.refunds_minor, c))),
