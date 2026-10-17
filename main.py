@@ -949,11 +949,11 @@ async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
     url = f"{settings.plisio_base_url}{path}"
     headers = {"Content-Type": "application/json"}
     
-    # Plisio API uses GET for all operations with query params
     payload = params or {}
     payload["api_key"] = settings.plisio_api_key
     
     try:
+        # Plisio strictly requires GET requests
         r = await S.http.get(url, params=payload, headers=headers)
         data = r.json()
     except (httpx.HTTPError, ValueError) as exc:
@@ -969,19 +969,21 @@ async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
 async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
     await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
     
-    # Plisio expects amount in standard units, not minor units
+    # Plisio expects amount in standard units (e.g., 25.00 for $25.00)
     amount = float(Decimal(amount_minor) / 100)
     
-    # Plisio uses GET requests for invoice creation
-    data = await plisio_request("/shops", {
-        "amount": amount,
-        "currency": settings.default_currency,
+    # Core fix: use /invoices/new, and for fiat currency conversion, pass source_currency/source_amount
+    data = await plisio_request("/invoices/new", {
+        "source_currency": settings.default_currency,
+        "source_amount": str(amount),  # Plisio expects string type
         "order_name": description[:100],
-        "order_number": reference,
+        "order_number": reference,     # Must be unique, your order number meets the requirement
         "email": user["email"],
-        "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook",
-        "success_url": f"{settings.public_app_url}/?order={reference}",
-        "fail_url": f"{settings.public_app_url}/?order={reference}&status=failed"
+        # Add ?json=true so Plisio returns JSON data, making Webhook verification easier[citation:19]
+        "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook?json=true", 
+        "success_invoice_url": f"{settings.public_app_url}/?order={reference}",
+        "fail_invoice_url": f"{settings.public_app_url}/?order={reference}&status=failed",
+        "expire_min": "60"  # Invoice validity period (minutes)
     })
     
     url = data.get("invoice_url", "")
@@ -995,7 +997,6 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
            "history": [{"status": "pending", "at": utcnow(), "note": "invoice created", "actor": None}]}
     await db()["payment_records"].insert_one(pay)
     return pay
-
 
 async def provider_state(track_id: str) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", track_id):
