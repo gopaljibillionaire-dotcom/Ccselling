@@ -264,7 +264,7 @@ async def get_session(request: Request) -> Optional[dict]:
     return sess
 
 
-EXEMPT_LIMIT = {"/api/health", "/api/payments/oxapay/webhook"}
+EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook"}
 
 
 async def api_rate_limit(request: Request) -> None:
@@ -358,7 +358,7 @@ class CartItemIn(Strict):
 
 
 class CheckoutIn(Strict):
-    payment_method: Literal["oxapay", "wallet"] = "oxapay"
+    payment_method: Literal["plisio", "wallet"] = "plisio"
 
 
 class DepositIn(Strict):
@@ -880,7 +880,7 @@ async def notify(user_id: ObjectId, title: str, body: str) -> None:
 
 
 # =============================================================================
-# 8. ORDERS & PAYMENTS (OxaPay)
+# 8. ORDERS & PAYMENTS (Plisio)
 # =============================================================================
 ORDER_TRANSITIONS = {"created": {"pending", "failed", "cancelled", "expired", "paid"}, "pending": {"paid", "failed", "expired", "cancelled"},
                      "paid": {"refunded"}, "failed": set(), "expired": set(), "cancelled": set(), "refunded": set()}
@@ -942,39 +942,58 @@ def public_order(o: dict, pay: Optional[dict] = None) -> dict:
     return d
 
 
-async def oxapay_request(method: str, path: str, payload: Optional[dict] = None) -> dict:
-    """Call the OxaPay Merchant API v1. Auth: 'merchant_api_key' header (per official docs)."""
-    if not settings.oxapay_enabled:
-        raise HTTPException(503, "Payments are not configured. Set OXAPAY_MERCHANT_API_KEY (see setup guide).")
+async def plisio_request(method: str, path: str, params: Optional[dict] = None) -> dict:
+    """Call the Plisio API. Auth: 'api_key' query parameter."""
+    if not settings.plisio_enabled:
+        raise HTTPException(503, "Payments are not configured. Set PLISIO_API_KEY.")
     assert S.http is not None
+    url = f"{settings.plisio_base_url}{path}"
+    headers = {"Content-Type": "application/json"}
+    
+    # Plisio API uses GET for invoices with query params, POST for others
+    payload = params or {}
+    payload["api_key"] = settings.plisio_api_key
+    
     try:
-        r = await S.http.request(method, f"{settings.oxapay_base_url}{path}", json=payload,
-                                 headers={"merchant_api_key": settings.oxapay_merchant_api_key, "Content-Type": "application/json"})
+        if method == "GET":
+            r = await S.http.get(url, params=payload, headers=headers)
+        else:
+            r = await S.http.post(url, json=payload, headers=headers)
         data = r.json()
     except (httpx.HTTPError, ValueError) as exc:
-        log.error("OxaPay request failed: %s", type(exc).__name__)
+        log.error("Plisio request failed: %s", type(exc).__name__)
         raise HTTPException(502, "Payment provider is temporarily unavailable. Please try again.")
-    if r.status_code != 200 or data.get("status") not in (200, None) or data.get("error"):
-        log.error("OxaPay error status=%s body=%s", r.status_code, json.dumps(data.get("error") or data.get("message"))[:300])
+    if r.status_code != 200 or data.get("status") == "error":
+        log.error("Plisio error status=%s body=%s", r.status_code, json.dumps(data)[:300])
         raise HTTPException(502, "Payment provider rejected the request. Please contact support if this persists.")
     return data.get("data") or {}
 
 
 async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
     await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
-    data = await oxapay_request("POST", "/payment/invoice", {
-        "amount": float(Decimal(amount_minor) / 100), "currency": settings.default_currency, "lifetime": settings.oxapay_invoice_lifetime_min,
-        "order_id": reference, "description": description[:100], "email": user["email"], "under_paid_coverage": 0, "fee_paid_by_payer": 1,
-        "callback_url": f"{settings.public_app_url}/api/payments/oxapay/webhook", "return_url": f"{settings.public_app_url}/?order={reference}",
-        "sandbox": settings.oxapay_sandbox})
-    url = data.get("payment_url", "")
+    
+    # Plisio expects amount in standard units, not minor units
+    amount = float(Decimal(amount_minor) / 100)
+    
+    data = await plisio_request("GET", "/shops", {
+        "amount": amount,
+        "currency": settings.default_currency,
+        "order_name": description[:100],
+        "order_number": reference,
+        "email": user["email"],
+        "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook",
+        "success_url": f"{settings.public_app_url}/?order={reference}",
+        "fail_url": f"{settings.public_app_url}/?order={reference}&status=failed"
+    })
+    
+    url = data.get("invoice_url", "")
     host = (sec.urlparse(url).hostname or "") if url else ""
-    if not data.get("track_id") or sec.urlparse(url).scheme != "https" or not (host == "oxapay.com" or host.endswith(".oxapay.com")):
+    if not data.get("txn_id") or sec.urlparse(url).scheme != "https" or not (host == "plisio.net" or host.endswith(".plisio.net")):
         raise HTTPException(502, "Payment provider returned an unexpected response")
-    expires = datetime.fromtimestamp(data["expired_at"], timezone.utc) if data.get("expired_at") else utcnow() + timedelta(minutes=settings.oxapay_invoice_lifetime_min)
-    pay = {"provider": "oxapay", "purpose": purpose, "reference": reference, "order_id": order_id, "user_id": user["_id"], "track_id": str(data["track_id"]),
+        
+    pay = {"provider": "plisio", "purpose": purpose, "reference": reference, "order_id": order_id, "user_id": user["_id"], "track_id": str(data["txn_id"]),
            "payment_url": url, "expected_minor": amount_minor, "currency": settings.default_currency, "status": "pending", "verified_minor": None,
-           "verification": None, "sandbox": settings.oxapay_sandbox, "created_at": utcnow(), "updated_at": utcnow(), "expires_at": expires,
+           "verification": None, "sandbox": settings.plisio_sandbox, "created_at": utcnow(), "updated_at": utcnow(),
            "history": [{"status": "pending", "at": utcnow(), "note": "invoice created", "actor": None}]}
     await db()["payment_records"].insert_one(pay)
     return pay
@@ -983,18 +1002,16 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
 async def provider_state(track_id: str) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", track_id):
         raise HTTPException(502, "Invalid provider reference")
-    return await oxapay_request("GET", f"/payment/{track_id}")
+    return await plisio_request("GET", f"/operations/{track_id}")
 
 
 def map_provider_status(raw: str) -> str:
     s = (raw or "").strip().lower()
-    if s == "paid":
+    if s in ("completed", "confirmed"):
         return "paid"
-    if s == "expired":
-        return "expired"
-    if s in ("failed", "refunded", "canceled", "cancelled"):
+    if s in ("expired", "cancelled", "error", "failed"):
         return "failed"
-    return "pending"  # new / waiting / paying / confirming
+    return "pending"  # new / waiting / pending
 
 
 def verify_amounts(pay: dict, data: dict) -> Optional[str]:
@@ -1007,7 +1024,7 @@ def verify_amounts(pay: dict, data: dict) -> Optional[str]:
         return f"amount mismatch (expected {minor_to_str(pay['expected_minor'])}, provider {paid})"
     if str(data.get("currency", "")).upper() != pay["currency"].upper():
         return "currency mismatch"
-    if str(data.get("order_id", "")) != pay["reference"]:
+    if str(data.get("order_number", "")) != pay["reference"]:
         return "order reference mismatch"
     return None
 
@@ -1088,7 +1105,7 @@ async def sweep_once() -> None:
     now = utcnow()
     async for order in db()["orders"].find({"status": {"$in": ["created", "pending"]}, "reservation_expires_at": {"$lt": now}}).limit(50):
         pay = await db()["payment_records"].find_one({"order_id": order["_id"]})
-        if pay and pay.get("track_id") and settings.oxapay_enabled:
+        if pay and pay.get("track_id") and settings.plisio_enabled:
             try:
                 data = await provider_state(pay["track_id"])
             except HTTPException:
@@ -1139,7 +1156,7 @@ async def health() -> dict:
             ok = True
         except Exception:
             ok = False
-    return {"status": "ok" if ok else "degraded", "database": "up" if ok else "down", "payments_configured": settings.oxapay_enabled,
+    return {"status": "ok" if ok else "degraded", "database": "up" if ok else "down", "payments_configured": settings.plisio_enabled,
             "uploads_configured": settings.imgbb_enabled, "environment": settings.app_env}
 
 
@@ -1149,7 +1166,7 @@ async def public_config() -> dict:
     tiers = await get_tiers()
     return {"brand_name": site.get("brand_name"), "tagline": site.get("tagline"), "hero_title": site.get("hero_title"), "hero_subtitle": site.get("hero_subtitle"),
             "support_url": site.get("support_url"), "support_email": site.get("support_email"), "terms_url": site.get("terms_url"),
-            "invite_only": site.get("invite_only", False), "currency": settings.default_currency, "payments_enabled": settings.oxapay_enabled,
+            "invite_only": site.get("invite_only", False), "currency": settings.default_currency, "payments_enabled": settings.plisio_enabled,
             "tax_rate_bps": site.get("tax_rate_bps", 0),
             "tiers": [{"key": t["key"], "name": t["name"], "threshold_minor": t["threshold_minor"], "discount_bps": t["discount_bps"],
                        "reward_multiplier_bps": t["reward_multiplier_bps"], "benefits": t.get("benefits", [])} for t in tiers]}
@@ -1551,7 +1568,7 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
     cart = await db()["carts"].find_one({"user_id": user["_id"]}) or {"items": []}
     if not cart["items"]:
         raise HTTPException(422, "Your cart is empty")
-    if body.payment_method == "oxapay" and not settings.oxapay_enabled:
+    if body.payment_method == "plisio" and not settings.plisio_enabled:
         raise HTTPException(503, "Crypto payments are not configured on this server")
     priced = await price_cart(user, cart["items"], strict=True)
     if priced["total_minor"] <= 0:
@@ -1618,7 +1635,7 @@ async def cancel_order(number: str, request: Request, user: dict = Depends(curre
     if o["status"] not in ("created", "pending"):
         raise HTTPException(409, "Only unpaid orders can be cancelled")
     pay = await db()["payment_records"].find_one({"order_id": o["_id"]})
-    if pay and pay.get("track_id") and settings.oxapay_enabled:  # never cancel if the provider already saw money
+    if pay and pay.get("track_id") and settings.plisio_enabled:  # never cancel if the provider already saw money
         try:
             if await apply_provider_state(pay, await provider_state(pay["track_id"]), "cancel-check") == "paid":
                 raise HTTPException(409, "Payment was already received for this order")
@@ -1636,41 +1653,40 @@ async def cancel_order(number: str, request: Request, user: dict = Depends(curre
 
 
 # ---- payments -----------------------------------------------------------------
-@api.post("/payments/oxapay/webhook")
-async def oxapay_webhook(request: Request) -> Response:
-    """OxaPay callback: HMAC-SHA512 over the raw body (header 'HMAC', key = merchant API key). Reply 'ok' on success."""
+@api.post("/payments/plisio/webhook")
+async def plisio_webhook(request: Request) -> Response:
+    """Plisio callback: verification is done via independent server-to-server call."""
     raw = await request.body()
     if len(raw) > 100_000:
         return PlainTextResponse("too large", status_code=413)
-    if not sec.verify_hmac_sha512(raw, request.headers.get("hmac"), settings.oxapay_merchant_api_key):
-        await audit(request, "webhook.bad_signature", category="security", level="warn")
-        return PlainTextResponse("Invalid HMAC signature", status_code=400)
     try:
-        payload = json.loads(raw)
-        if not isinstance(payload, dict) or payload.get("type") != "invoice" or not payload.get("track_id"):
+        # Plisio sends form data, but we verify by making an API call back to them
+        payload = json.loads(raw) if raw.startswith(b"{") else dict(await request.form())
+        if not payload.get("txn_id"):
             raise ValueError("unsupported payload")
         sec.reject_operators(payload)
     except (ValueError, HTTPException):
         await audit(request, "webhook.malformed", category="security", level="warn")
         return PlainTextResponse("Malformed payload", status_code=400)
+    
     key = hashlib.sha256(raw).hexdigest()
     try:
-        await db()["webhook_events"].insert_one({"event_key": key, "provider": "oxapay", "track_id": str(payload["track_id"]), "status": payload.get("status"),
-                                                 "payload": {k: payload.get(k) for k in ("track_id", "status", "type", "amount", "currency", "order_id", "date")},
+        await db()["webhook_events"].insert_one({"event_key": key, "provider": "plisio", "track_id": str(payload["txn_id"]), "status": payload.get("status"),
+                                                 "payload": {k: payload.get(k) for k in ("txn_id", "status", "amount", "currency", "order_number", "date")},
                                                  "processed": False, "attempts": 1, "received_at": utcnow()})
     except DuplicateKeyError:
         ev = await db()["webhook_events"].find_one_and_update({"event_key": key}, {"$inc": {"attempts": 1}})
         if ev and ev.get("processed"):
             return PlainTextResponse("ok")  # replayed delivery: already handled
-    pay = await db()["payment_records"].find_one({"track_id": str(payload["track_id"])})
+    pay = await db()["payment_records"].find_one({"track_id": str(payload["txn_id"])})
     if not pay:
         await db()["webhook_events"].update_one({"event_key": key}, {"$set": {"processed": True, "result": "unknown_track_id"}})
-        await audit(request, "webhook.unknown_track", target=payload["track_id"], category="security", level="warn")
+        await audit(request, "webhook.unknown_track", target=payload["txn_id"], category="security", level="warn")
         return PlainTextResponse("ok")
     try:
         verified = await provider_state(pay["track_id"])  # independent server-to-server verification
     except HTTPException:
-        return PlainTextResponse("provider unavailable", status_code=503)  # OxaPay retries later
+        return PlainTextResponse("provider unavailable", status_code=503)  # Plisio retries later
     result = await apply_provider_state(pay, verified, "webhook")
     await db()["webhook_events"].update_one({"event_key": key}, {"$set": {"processed": result != "inconsistent", "result": result, "processed_at": utcnow()}})
     if result == "inconsistent":
@@ -2122,7 +2138,7 @@ async def admin_webhooks(user: dict = Depends(admin_user)) -> dict:
 async def admin_reconcile(request: Request, user: dict = Depends(admin_user)) -> dict:
     """Re-verify every pending payment with the provider (never trusts admin input as proof of payment)."""
     checked, paid = 0, 0
-    async for pay in db()["payment_records"].find({"status": "pending", "provider": "oxapay"}).limit(100):
+    async for pay in db()["payment_records"].find({"status": "pending", "provider": "plisio"}).limit(100):
         try:
             res = await apply_provider_state(pay, await provider_state(pay["track_id"]), "reconcile")
         except HTTPException:
@@ -2500,14 +2516,14 @@ def test_state_machine() -> None:
 
 def test_amount_verification() -> None:
     pay = {"expected_minor": 5000, "currency": "USD", "reference": "ORD-1"}
-    assert verify_amounts(pay, {"amount": 50, "currency": "usd", "order_id": "ORD-1"}) is None
-    assert verify_amounts(pay, {"amount": 49.99, "currency": "USD", "order_id": "ORD-1"})
-    assert verify_amounts(pay, {"amount": 50, "currency": "EUR", "order_id": "ORD-1"})
-    assert verify_amounts(pay, {"amount": 50, "currency": "USD", "order_id": "ORD-2"})
+    assert verify_amounts(pay, {"amount": 50, "currency": "usd", "order_number": "ORD-1"}) is None
+    assert verify_amounts(pay, {"amount": 49.99, "currency": "USD", "order_number": "ORD-1"})
+    assert verify_amounts(pay, {"amount": 50, "currency": "EUR", "order_number": "ORD-1"})
+    assert verify_amounts(pay, {"amount": 50, "currency": "USD", "order_number": "ORD-2"})
 
 
 def test_provider_status_mapping() -> None:
-    assert map_provider_status("Paid") == "paid" and map_provider_status("Paying") == "pending" and map_provider_status("Expired") == "expired"
+    assert map_provider_status("completed") == "paid" and map_provider_status("pending") == "pending" and map_provider_status("expired") == "expired"
 
 
 def test_dynamic_field_validation() -> None:
