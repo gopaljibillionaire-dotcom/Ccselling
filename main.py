@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlparse
 
 import httpx
 from bson import ObjectId
@@ -941,6 +942,7 @@ def public_order(o: dict, pay: Optional[dict] = None) -> dict:
         d["payment_url"] = pay["payment_url"]
     return d
 
+
 async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
     """Call the Plisio API. Auth: 'api_key' query parameter. Plisio ONLY uses GET."""
     if not settings.plisio_enabled:
@@ -948,30 +950,46 @@ async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
     assert S.http is not None
     url = f"{settings.plisio_base_url}{path}"
     headers = {"Content-Type": "application/json"}
-    
+
     payload = params or {}
     payload["api_key"] = settings.plisio_api_key
-    
+
     try:
         # Plisio strictly requires GET requests
         r = await S.http.get(url, params=payload, headers=headers)
+        log.info("Plisio response status=%s body=%s", r.status_code, r.text[:500])
         data = r.json()
     except (httpx.HTTPError, ValueError) as exc:
-        log.error("Plisio request failed: %s", type(exc).__name__)
+        log.error("Plisio request failed: %s - %s", type(exc).__name__, str(exc))
         raise HTTPException(502, "Payment provider is temporarily unavailable. Please try again.")
-    
-    if r.status_code != 200 or data.get("status") == "error":
-        log.error("Plisio error status=%s body=%s", r.status_code, json.dumps(data)[:300])
+
+    # Plisio returns {"status": "success", "data": {...}} or {"status": "error", "data": {...}}
+    if r.status_code != 200:
+        log.error("Plisio HTTP error status=%s body=%s", r.status_code, r.text[:500])
         raise HTTPException(502, "Payment provider rejected the request. Please contact support if this persists.")
-    return data.get("data") or {}
+
+    # Check status field - Plisio uses "success" for successful responses
+    status_field = data.get("status", "").lower()
+    if status_field == "error":
+        error_msg = data.get("data", {}).get("message", "Unknown error")
+        log.error("Plisio API error: %s", error_msg)
+        raise HTTPException(502, f"Payment provider error: {error_msg}")
+
+    # Plisio wraps response in "data" key
+    result = data.get("data")
+    if result is None:
+        log.error("Plisio response missing 'data' field: %s", json.dumps(data)[:500])
+        raise HTTPException(502, "Payment provider returned an unexpected response format.")
+
+    return result
 
 
 async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
     await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
-    
+
     # Plisio expects amount in standard units (e.g., 25.00 for $25.00)
     amount = float(Decimal(amount_minor) / 100)
-    
+
     # Core fix: use /invoices/new, and for fiat currency conversion, pass source_currency/source_amount
     data = await plisio_request("/invoices/new", {
         "source_currency": settings.default_currency,
@@ -979,24 +997,40 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
         "order_name": description[:100],
         "order_number": reference,     # Must be unique, your order number meets the requirement
         "email": user["email"],
-        # Add ?json=true so Plisio returns JSON data, making Webhook verification easier[citation:19]
-        "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook?json=true", 
+        # Add ?json=true so Plisio returns JSON data, making Webhook verification easier
+        "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook?json=true",
         "success_invoice_url": f"{settings.public_app_url}/?order={reference}",
         "fail_invoice_url": f"{settings.public_app_url}/?order={reference}&status=failed",
         "expire_min": "60"  # Invoice validity period (minutes)
     })
-    
-    url = data.get("invoice_url", "")
-    host = (sec.urlparse(url).hostname or "") if url else ""
-    if not data.get("txn_id") or sec.urlparse(url).scheme != "https" or not (host == "plisio.net" or host.endswith(".plisio.net")):
-        raise HTTPException(502, "Payment provider returned an unexpected response")
-        
-    pay = {"provider": "plisio", "purpose": purpose, "reference": reference, "order_id": order_id, "user_id": user["_id"], "track_id": str(data["txn_id"]),
-           "payment_url": url, "expected_minor": amount_minor, "currency": settings.default_currency, "status": "pending", "verified_minor": None,
+
+    # Plisio returns txn_id and invoice_url at the top level of "data"
+    txn_id = data.get("txn_id") or data.get("id")
+    invoice_url = data.get("invoice_url") or data.get("url", "")
+
+    if not txn_id:
+        log.error("Plisio response missing txn_id: %s", json.dumps(data)[:500])
+        raise HTTPException(502, "Payment provider returned an unexpected response (missing transaction ID).")
+
+    if not invoice_url:
+        log.error("Plisio response missing invoice_url: %s", json.dumps(data)[:500])
+        raise HTTPException(502, "Payment provider returned an unexpected response (missing payment URL).")
+
+    # Validate URL
+    parsed = urlparse(invoice_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (host == "plisio.net" or host.endswith(".plisio.net")):
+        log.error("Plisio returned invalid invoice URL: %s", invoice_url)
+        raise HTTPException(502, "Payment provider returned an unexpected response (invalid URL).")
+
+    pay = {"provider": "plisio", "purpose": purpose, "reference": reference, "order_id": order_id, "user_id": user["_id"],
+           "track_id": str(txn_id), "payment_url": invoice_url, "expected_minor": amount_minor,
+           "currency": settings.default_currency, "status": "pending", "verified_minor": None,
            "verification": None, "sandbox": settings.plisio_sandbox, "created_at": utcnow(), "updated_at": utcnow(),
            "history": [{"status": "pending", "at": utcnow(), "note": "invoice created", "actor": None}]}
     await db()["payment_records"].insert_one(pay)
     return pay
+
 
 async def provider_state(track_id: str) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", track_id):
@@ -1668,7 +1702,7 @@ async def plisio_webhook(request: Request) -> Response:
     except (ValueError, HTTPException):
         await audit(request, "webhook.malformed", category="security", level="warn")
         return PlainTextResponse("Malformed payload", status_code=400)
-    
+
     key = hashlib.sha256(raw).hexdigest()
     try:
         await db()["webhook_events"].insert_one({"event_key": key, "provider": "plisio", "track_id": str(payload["txn_id"]), "status": payload.get("status"),
