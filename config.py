@@ -93,6 +93,14 @@ class Settings:
     plisio_sandbox: bool = field(default_factory=lambda: _bool("PLISIO_SANDBOX", True))
     checkout_reservation_minutes: int = field(default_factory=lambda: _int("CHECKOUT_RESERVATION_MINUTES", 65))
 
+    # --- Wallet --------------------------------------------------------------
+    wallet_deposit_min_minor: int = field(default_factory=lambda: _int("WALLET_DEPOSIT_MIN_MINOR", 500))    # $5.00
+    wallet_deposit_max_minor: int = field(default_factory=lambda: _int("WALLET_DEPOSIT_MAX_MINOR", 500000)) # $5000.00
+
+    # --- Rewards & Background Tasks ------------------------------------------
+    referral_reward_points: int = field(default_factory=lambda: _int("REFERRAL_REWARD_POINTS", 100))
+    reconcile_interval_seconds: int = field(default_factory=lambda: _int("RECONCILE_INTERVAL_SECONDS", 60))
+
     # --- ImgBB ---------------------------------------------------------------
     imgbb_api_key: str = field(default_factory=lambda: _env("IMGBB_API_KEY"))
     image_host_allowlist: List[str] = field(
