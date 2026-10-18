@@ -296,6 +296,7 @@ dialog::backdrop { background: rgba(3, 8, 20, .75); backdrop-filter: blur(3px); 
     <form id="loginForm" novalidate>
       <div class="f"><label for="em">Email</label><input id="em" type="email" autocomplete="username" required></div>
       <div class="f"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
+      <div class="f"><label for="capAns">Security check</label><img id="capImg" alt="Security check" style="width:100%;border-radius:10px;border:1px solid var(--line);background:#0b1430"><div class="row" style="margin-top:6px"><input id="capAns" maxlength="5" autocomplete="off" placeholder="Enter the code" style="flex:1"><button class="btn sm" type="button" id="capRef" aria-label="New code">↻</button></div></div>
       <div id="mfaBox" class="hide">
         <div id="mfaSetup" class="hide"><p class="small">Scan this URI with an authenticator app (or enter the secret manually), then enter the 6‑digit code.</p><div class="f"><label>Secret</label><input id="mfaSecret" readonly></div><div class="f"><label>otpauth URI</label><textarea id="mfaUri" readonly></textarea></div></div>
         <div class="f"><label for="otp">Authentication code</label><input id="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
@@ -341,15 +342,19 @@ const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("the
 /* ---------- login / MFA ---------- */
 function signedOut(msg) { st.token = null; st.csrf = null; st.user = null; SS.del("tok"); $("#appView").classList.add("hide"); $("#loginView").classList.remove("hide"); if (msg) $("#loginErr").textContent = msg; }
 $("#apiBase").value = (SS.get("base") || "");
+let captchaId = "";
+const loadCaptcha = go(async () => { const r = await api("/auth/captcha"); captchaId = r.captcha_id; $("#capImg").src = "data:image/svg+xml;utf8," + encodeURIComponent(r.svg); $("#capAns").value = ""; });
+$("#capRef").addEventListener("click", loadCaptcha);
+loadCaptcha();
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault(); $("#loginErr").textContent = ""; const b = $("#apiBase").value.trim().replace(/\/+$/, ""); if (b && !/^https?:\/\//.test(b)) { $("#loginErr").textContent = "Server URL must start with https://"; return; } st.base = b; SS.set("base", b);
   try {
     if (!st.pending) {
-      const r = await api("/auth/login", { method: "POST", body: { email: $("#em").value, password: $("#pw").value } });
+      const r = await api("/auth/login", { method: "POST", body: { email: $("#em").value, password: $("#pw").value, captcha_id: captchaId, captcha_answer: $("#capAns").value } });
       if (r.mfa_required) { st.pending = r.mfa_token; st.token = r.mfa_token; $("#mfaBox").classList.remove("hide"); $("#pw").value = ""; $("#loginBtn").textContent = "Verify"; if (!r.mfa_enrolled) { const s = await api("/auth/mfa/setup", { method: "POST" }); $("#mfaSetup").classList.remove("hide"); $("#mfaSecret").value = s.secret; $("#mfaUri").value = s.otpauth_uri; } $("#otp").focus(); }
       else await finish(r);
     } else { const r = await api("/auth/mfa/verify", { method: "POST", body: { code: $("#otp").value.trim() } }); await finish(r); }
-  } catch (x) { $("#loginErr").textContent = x.message; if (/MFA session/.test(x.message)) resetLogin(); }
+  } catch (x) { $("#loginErr").textContent = x.message; loadCaptcha(); if (/MFA session/.test(x.message)) resetLogin(); }
 });
 function resetLogin() { st.pending = null; st.token = null; $("#mfaBox").classList.add("hide"); $("#mfaSetup").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; }
 async function finish(r) {
@@ -365,7 +370,7 @@ const SECTIONS = [
   ["categories", "Categories", "▤"], ["countries", "Countries", "🌐"], ["inventory", "Inventory", "📦"],
   ["orders", "Orders", "🧾"], ["payments", "Payments", "💳"], ["users", "Customers", "👤"],
   ["invites", "Invitations", "✉"], ["tiers", "Membership", "🏅"], ["tickets", "Support", "💬"],
-  ["reviews", "Reviews", "⭐"], ["settings", "Settings", "🔧"], ["audit", "Audit log", "📋"]
+  ["reviews", "Reviews", "⭐"], ["settings", "Settings", "🔧"]
 ];
 const isAdmin = () => ["admin", "superadmin"].includes(st.user.role);
 async function start() {
@@ -393,10 +398,7 @@ VIEWS.overview = async () => {
     tile("Out of stock", s.out_of_stock), tile("Orders", s.orders_total),
     tile("Pending orders", s.orders_pending), tile("Completed orders", s.orders_completed),
     tile("Pending payments", s.payments_pending), tile("Verified revenue (net)", money(s.revenue_minor, c), true),
-    tile("Refunds", money(s.refunds_minor, c))),
-    h("div", { class: "grid" },
-      h("div", { class: "panel" }, h("h2", null, "Recent security events"), table(["When", "Event", "IP"], s.recent_security_events.map((e) => h("tr", null, h("td", null, when(e.at)), h("td", null, e.action, " ", e.level === "warn" || e.level === "error" ? chip("bad") : null), h("td", null, e.ip || ""))))),
-      h("div", { class: "panel" }, h("h2", null, "Recent inventory changes"), table(["When", "SKU", "Type", "Δ"], s.recent_inventory.map((m) => h("tr", null, h("td", null, when(m.at)), h("td", null, m.sku), h("td", null, m.type), h("td", null, String(m.delta))))))));
+    tile("Refunds", money(s.refunds_minor, c))));
 };
 
 /* products + dynamic form */
@@ -412,7 +414,23 @@ async function productForm(id) {
   const name = inp(existing ? existing.name : "", "text", { maxlength: 140 }), short = inp(existing ? existing.short_description : "", "text", { maxlength: 240 }), desc = h("textarea", { maxlength: 8000 }, existing ? existing.description : ""), price = inp(existing ? existing.price : "", "text", { inputmode: "decimal", placeholder: "49.99" }), disc = inp(existing ? existing.discount_percent : 0, "number", { min: 0, max: 90 }), sub = inp(existing ? existing.subcategory : "", "text", { maxlength: 60 }), low = inp(existing ? existing.low_stock_threshold : 5, "number", { min: 0 }), deliv = inp(existing ? existing.delivery_info : "", "text", { maxlength: 500 }), refund = inp(existing ? existing.refund_policy : "", "text", { maxlength: 1000 }), tags = inp(existing ? (existing.tags || []).join(", ") : "", "text");
   const country = h("select", null, st.countries.map((c) => h("option", { value: c.code, selected: existing && existing.country === c.code }, c.name))); const cat = h("select", null, st.cats.map((c) => h("option", { value: c.id, selected: existing && existing.category_id === c.id }, c.name)));
   const feat = h("input", { type: "checkbox" }); if (existing && existing.featured) feat.checked = true; const statusSel = h("select", null, ["draft", "published"].map((x) => h("option", { value: x, selected: existing && existing.status === x }, x)));
-  const imgBox = h("div"), varBox = h("div");
+  const imgBox = h("div"), varBox = h("div"), delBox = h("div");
+  const deliveryItems = existing && existing.delivery ? existing.delivery.items.map((i) => ({ text: i.text || "", vars: { ...(i.vars || {}) } })) : [];
+  const delTmpl = h("textarea", { maxlength: 5000, placeholder: "Fallback message (used when no delivery copies remain). Supports # / ## / ### headings and {order} {email} {name} {sku} placeholders." }, existing && existing.delivery ? (existing.delivery.template || "") : "");
+  const drawDelivery = () => {
+    clear(delBox);
+    deliveryItems.forEach((it, i) => {
+      const t = h("textarea", { maxlength: 5000, placeholder: "## Account for {name}\nLogin: user@example.com\nPassword: secret\nLink: https://…" }, it.text);
+      t.addEventListener("input", () => (it.text = t.value));
+      const v = h("textarea", { maxlength: 500, placeholder: "name=Gopal\ncode=ABC-123", style: "min-height:56px" }, it.vars ? Object.entries(it.vars).map(([k, x]) => k + "=" + x).join("\n") : "");
+      v.addEventListener("input", () => { it.vars = {}; v.value.split("\n").forEach((l) => { const ix = l.indexOf("="); if (ix > 0) it.vars[l.slice(0, ix).trim()] = l.slice(ix + 1); }); });
+      delBox.append(h("div", { class: "panel", style: "margin-bottom:10px" },
+        h("div", { class: "row between" }, h("strong", { class: "small" }, "Delivery copy #" + (i + 1)), h("button", { class: "btn sm danger", type: "button", onclick: () => { deliveryItems.splice(i, 1); drawDelivery(); } }, "Remove")),
+        h("div", { class: "f" }, h("label", null, "What the buyer receives"), t),
+        h("div", { class: "f" }, h("label", null, "Placeholders (key=value per line)"), v)));
+    });
+    delBox.append(h("button", { class: "btn sm", type: "button", onclick: () => { deliveryItems.push({ text: "", vars: {} }); drawDelivery(); } }, "+ Add delivery copy"));
+  };
   const drawImages = () => { clear(imgBox); images.forEach((im, i) => { const u = inp(im.url, "url", { placeholder: "https://i.ibb.co/…/photo.jpg" }); u.addEventListener("change", () => { im.url = u.value; drawImages(); }); const alt = inp(im.alt || "", "text", { placeholder: "Alt text", maxlength: 140 }); alt.addEventListener("input", () => (im.alt = alt.value)); imgBox.append(h("div", { class: "row" }, h("div", { class: "grow" }, u), h("div", { class: "grow" }, alt), h("button", { class: "btn sm", type: "button", disabled: i === 0, onclick: () => { [images[i - 1], images[i]] = [images[i], images[i - 1]]; drawImages(); } }, "↑"), h("button", { class: "btn sm danger", type: "button", onclick: () => { images.splice(i, 1); drawImages(); } }, "✕")), im.url ? h("div", { class: "prev" }, h("img", { src: im.url, alt: im.alt || "preview", onerror: (e) => { e.target.alt = "Image failed to load"; } })) : null); }); imgBox.append(h("button", { class: "btn sm", type: "button", onclick: () => { images.push({ url: "", alt: "" }); drawImages(); } }, "+ Add image URL"), " ", h("label", { class: "btn sm", style: "display:inline-block;cursor:pointer" }, "Upload to ImgBB", h("input", { type: "file", accept: "image/*", class: "hide", onchange: go(async (e) => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append("file", f); const hd = { Authorization: "Bearer " + st.token }; const r = await fetch(st.base + "/api/admin/uploads", { method: "POST", headers: hd, body: fd }); const d = await r.json(); if (!r.ok) throw new Error(d.error || "Upload failed"); images.push({ url: d.url, alt: "" }); drawImages(); toast("Uploaded.", "ok"); }) }))); };
   const drawVariants = () => { clear(varBox); variants.forEach((v, i) => { const mk = (k, ph, t = "text") => { const x = inp(v[k], t, { placeholder: ph }); x.addEventListener("input", () => (v[k] = t === "number" ? Number(x.value) : x.value)); return x; }; const stockIn = mk("stock", "Initial stock", "number"); if (existing && existing.variants.some((o) => o.sku === v.sku)) { stockIn.disabled = true; stockIn.title = "Change stock from the Inventory page"; } varBox.append(h("div", { class: "row" }, h("div", { class: "grow" }, mk("sku", "SKU")), h("div", { class: "grow" }, mk("label", "Label")), h("div", { class: "grow" }, mk("price", "Override price")), h("div", { class: "grow" }, stockIn), variants.length > 1 ? h("button", { class: "btn sm danger", type: "button", onclick: () => { variants.splice(i, 1); drawVariants(); } }, "✕") : null)); }); varBox.append(h("button", { class: "btn sm", type: "button", onclick: () => { variants.push({ sku: "SKU" + (variants.length + 1), label: "", price: "", stock: 0 }); drawVariants(); } }, "+ Add variant")); };
   async function drawDynamic() {
@@ -432,12 +450,17 @@ async function productForm(id) {
       else if (t === "metadata") { el = h("textarea", { placeholder: "key=value per line" }, cur ? Object.entries(cur).map(([k, v]) => `${k}=${v}`).join("\n") : ""); get = () => { const o = {}; el.value.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) o[l.slice(0, i).trim()] = l.slice(i + 1).trim(); }); return Object.keys(o).length ? o : null; }; }
       fv[fd.key] = get; dyn.append(field(fd.label + (fd.required ? " *" : ""), el, fd.help_text)); });
   }
-  cat.addEventListener("change", go(drawDynamic)); drawImages(); drawVariants(); await drawDynamic();
-  const collect = () => { const fields = {}; for (const [k, g] of Object.entries(fv)) { const v = g(); if (v !== null && v !== "" && !(Array.isArray(v) && !v.length)) fields[k] = v; } return { name: name.value, short_description: short.value, description: desc.value, price: price.value, discount_percent: Number(disc.value || 0), country: country.value, category_id: cat.value, subcategory: sub.value, images: images.filter((i) => i.url), variants: variants.map((v) => ({ sku: v.sku, label: v.label, price: v.price || null, stock: Number(v.stock || 0) })), low_stock_threshold: Number(low.value || 0), fields, tags: tags.value.split(",").map((t) => t.trim()).filter(Boolean), featured: feat.checked, status: statusSel.value, delivery_info: deliv.value, refund_policy: refund.value }; };
+  cat.addEventListener("change", go(drawDynamic)); drawImages(); drawVariants(); drawDelivery(); await drawDynamic();
+  const collect = () => { const fields = {}; for (const [k, g] of Object.entries(fv)) { const v = g(); if (v !== null && v !== "" && !(Array.isArray(v) && !v.length)) fields[k] = v; } return { name: name.value, short_description: short.value, description: desc.value, price: price.value, discount_percent: Number(disc.value || 0), country: country.value, category_id: cat.value, subcategory: sub.value, images: images.filter((i) => i.url), variants: variants.map((v) => ({ sku: v.sku, label: v.label, price: v.price || null, stock: Number(v.stock || 0) })), low_stock_threshold: Number(low.value || 0), fields, tags: tags.value.split(",").map((t) => t.trim()).filter(Boolean), featured: feat.checked, status: statusSel.value, delivery_info: deliv.value, refund_policy: refund.value,
+      delivery_template: delTmpl.value, delivery_items: deliveryItems.filter((i) => i.text.trim()).map((i) => ({ text: i.text, vars: i.vars || {} })) }; };
   const preview = () => { const b = collect(); const p = h("div", { class: "panel" }, h("h3", null, b.name || "(untitled)"), h("p", { class: "muted small" }, `${country.selectedOptions[0].text} · ${cat.selectedOptions[0].text}`), b.images[0] ? h("img", { src: b.images[0].url, alt: "", style: "max-width:100%;border-radius:10px" }) : null, h("p", null, b.short_description), h("div", { class: "stat" }, "$" + b.price, b.discount_percent ? h("span", { class: "chip warn" }, "-" + b.discount_percent + "%") : null), h("p", { style: "white-space:pre-wrap" }, b.description), h("div", null, Object.entries(b.fields).map(([k, v]) => h("div", { class: "small" }, h("strong", null, k + ": "), typeof v === "object" ? JSON.stringify(v) : String(v)))), h("p", { class: "hint" }, "Preview only. The storefront renders validated server data.")); modal("Preview", p); };
   const err = h("div", { class: "err", role: "alert" });
   root.append(h("div", { class: "grid" }, field("Name *", name), field("Price (USD) *", price, "Decimal with at most 2 places"), field("Discount %", disc), field("Country *", country), field("Category *", cat), field("Subcategory", sub), field("Low-stock threshold", low), field("Status", statusSel), field("Tags", tags, "Comma separated")), field("Short description", short), field("Description", desc), field("Delivery info", deliv), field("Refund policy", refund), h("label", { class: "row" }, feat, "Featured / recommended"),
-    h("h3", null, "Images (ImgBB or allow-listed hosts)"), imgBox, h("h3", null, "Variants & initial stock"), varBox, h("h3", null, "Category fields"), dyn, err,
+    h("h3", null, "Images (ImgBB or allow-listed hosts)"), imgBox, h("h3", null, "Variants & initial stock"), varBox,
+    h("h3", null, "Digital delivery (shown to the buyer after payment)"),
+    h("div", { class: "f" }, h("label", null, "Fallback message"), delTmpl), delBox,
+    h("p", { class: "hint", style: "margin-bottom:10px" }, "One copy is handed out per unit sold, in order. Start a line with # / ## / ### for a bold heading. Built-in placeholders: {order} {email} {name} {sku}; add your own as key=value lines per copy (e.g. name=Gopal)."),
+    h("h3", null, "Category fields"), dyn, err,
     h("div", { class: "row" }, h("button", { class: "btn", type: "button", onclick: go(async () => preview()) }, "Preview"), h("button", { class: "btn primary", type: "button", onclick: async () => { err.textContent = ""; try { const body = collect(); if (id) await api("/admin/products/" + id, { method: "PUT", body }); else await api("/admin/products", { method: "POST", body }); $("#dlg").close(); toast("Product saved.", "ok"); show("products"); } catch (x) { err.textContent = x.message; } } }, "Save")));
   modal(id ? "Edit product" : "New product", root);
 }
@@ -469,12 +492,12 @@ VIEWS.countries = async () => {
 };
 
 VIEWS.inventory = async () => {
-  const r = await api("/admin/inventory"); const mv = await api("/admin/inventory/movements");
+  const r = await api("/admin/inventory");
   const adjust = (row) => { const d = h("input", { type: "number", placeholder: "+10 or -3" }), to = h("input", { type: "number", min: 0, placeholder: "Set exact stock" }), why = h("input", { placeholder: "Reason (required)" }), e = h("div", { class: "err" }); modal(`Adjust ${row.sku}`, h("div", null, h("p", { class: "muted small" }, `${row.name} — stock ${row.stock}, reserved ${row.reserved}, available ${row.available}`), field("Change by", d), field("…or set to", to), field("Reason", why), e, h("button", { class: "btn primary", type: "button", onclick: async () => { try { const body = { product_id: row.product_id, sku: row.sku, reason: why.value }; if (d.value !== "") body.delta = Number(d.value); else if (to.value !== "") body.set_to = Number(to.value); await api("/admin/inventory/adjust", { method: "POST", body }); $("#dlg").close(); show("inventory"); } catch (x) { e.textContent = x.message; } } }, "Apply"))); };
   const csvIn = h("input", { type: "file", accept: ".csv" });
   const importCsv = go(async () => { const f = csvIn.files[0]; if (!f) throw new Error("Choose a CSV exported from this page."); const lines = (await f.text()).split(/\r?\n/).slice(1).filter(Boolean); const rows = lines.map((l) => { const c = l.split(","); return { product_id: c[0], sku: c[2], stock: Number(c[3]) }; }); const why = prompt("Reason for this import (audited):"); if (!why) return; const res = await api("/admin/inventory/import", { method: "POST", body: { rows, reason: why } }); toast(`Applied ${res.applied} row(s), ${res.errors.length} error(s).`, res.errors.length ? "bad" : "ok"); show("inventory"); });
   const exportCsv = go(async () => { const res = await api("/admin/inventory/export", { raw: true }); const b = await res.blob(); const a = h("a", { href: URL.createObjectURL(b), download: "inventory.csv" }); document.body.append(a); a.click(); a.remove(); });
-  return h("div", null, h("div", { class: "panel row" }, isAdmin() ? h("button", { class: "btn", type: "button", onclick: exportCsv }, "Export CSV") : null, isAdmin() ? [csvIn, h("button", { class: "btn", type: "button", onclick: importCsv }, "Import CSV")] : null), h("div", { class: "panel" }, table(["Product", "SKU", "Stock", "Reserved", "Available", "Sold", "Low at", ""], r.rows.map((x) => h("tr", null, h("td", null, x.name), h("td", null, x.sku, " ", h("span", { class: "muted" }, x.label)), h("td", null, x.stock), h("td", null, x.reserved), h("td", null, x.available <= 0 ? chip("failed") : x.available <= x.low_stock_threshold ? chip("pending") : null, " ", x.available), h("td", null, x.sold), h("td", null, x.low_stock_threshold), h("td", null, isAdmin() ? h("button", { class: "btn sm", type: "button", onclick: () => adjust(x) }, "Adjust") : null))))), h("div", { class: "panel" }, h("h2", null, "Stock movements"), table(["When", "SKU", "Type", "Stock Δ", "Avail Δ", "Reserved Δ", "Reason"], mv.movements.map((m) => h("tr", null, h("td", null, when(m.at)), h("td", null, m.sku), h("td", null, m.type), h("td", null, m.delta_stock), h("td", null, m.delta_available), h("td", null, m.delta_reserved), h("td", null, m.reason))))));
+  return h("div", null, h("div", { class: "panel row" }, isAdmin() ? h("button", { class: "btn", type: "button", onclick: exportCsv }, "Export CSV") : null, isAdmin() ? [csvIn, h("button", { class: "btn", type: "button", onclick: importCsv }, "Import CSV")] : null), h("div", { class: "panel" }, table(["Product", "SKU", "Stock", "Reserved", "Available", "Sold", "Low at", ""], r.rows.map((x) => h("tr", null, h("td", null, x.name), h("td", null, x.sku, " ", h("span", { class: "muted" }, x.label)), h("td", null, x.stock), h("td", null, x.reserved), h("td", null, x.available <= 0 ? chip("failed") : x.available <= x.low_stock_threshold ? chip("pending") : null, " ", x.available), h("td", null, x.sold), h("td", null, x.low_stock_threshold), h("td", null, isAdmin() ? h("button", { class: "btn sm", type: "button", onclick: () => adjust(x) }, "Adjust") : null))))));
 };
 
 VIEWS.orders = async () => {
@@ -486,10 +509,10 @@ VIEWS.orders = async () => {
   q.addEventListener("input", () => { clearTimeout(q._t); q._t = setTimeout(go(load), 300); }); ss.addEventListener("change", go(load)); await load(); return h("div", null, h("div", { class: "panel row" }, q, ss), h("div", { class: "panel" }, box));
 };
 VIEWS.payments = async () => {
-  const r = await api("/admin/payments"); const wh = isAdmin() ? await api("/admin/webhooks") : { events: [] };
+  const r = await api("/admin/payments");
   return h("div", null, isAdmin() ? h("div", { class: "panel row" }, h("button", { class: "btn primary", type: "button", onclick: go(async () => { const x = await api("/admin/payments/reconcile", { method: "POST" }); toast(`Checked ${x.checked}; newly paid ${x.newly_paid}.`, "ok"); show("payments"); }) }, "Re-verify pending payments with provider"), h("span", { class: "muted small" }, "Reconciliation queries the provider; it never accepts manual proof.")) : null,
-    h("div", { class: "panel" }, table(["Provider", "Order ref", "Invoice", "Expected", "Verified", "Status", "Verification", "Reconciliation", "Created"], r.payments.map((p) => h("tr", null, h("td", null, p.provider, p.sandbox ? " (sandbox)" : ""), h("td", null, p.reference), h("td", null, p.invoice_ref), h("td", null, money(p.expected_minor, p.currency)), h("td", null, p.verified_minor != null ? money(p.verified_minor, p.currency) : "—"), h("td", null, chip(p.status)), h("td", null, p.verification), h("td", null, chip(p.reconciliation)), h("td", null, when(p.created_at)))))),
-    isAdmin() ? h("div", { class: "panel" }, h("h2", null, "Webhook events"), table(["Received", "Track", "Status", "Processed", "Result", "Attempts"], wh.events.map((e) => h("tr", null, h("td", null, when(e.received_at)), h("td", null, e.track_id), h("td", null, e.status), h("td", null, String(e.processed)), h("td", null, e.result || ""), h("td", null, e.attempts))))) : null);
+    h("div", { class: "panel" }, table(["Provider", "Order ref", "Invoice", "Expected", "Verified", "Status", "Verification", "Reconciliation", "Created"], r.payments.map((p) => h("tr", null, h("td", null, p.provider, p.sandbox ? " (sandbox)" : ""), h("td", null, p.reference), h("td", null, p.invoice_ref), h("td", null, money(p.expected_minor, p.currency)), h("td", null, p.verified_minor != null ? money(p.verified_minor, p.currency) : "—"), h("td", null, chip(p.status)), h("td", null, p.verification), h("td", null, chip(p.reconciliation)), h("td", null, when(p.created_at))))))
+    );
 };
 VIEWS.users = async () => {
   const q = h("input", { placeholder: "Email starts with…" }), box = h("div");
@@ -514,7 +537,7 @@ VIEWS.settings = async () => {
   const inv = h("input", { type: "checkbox", checked: !!r.invite_only });
   return h("div", { class: "panel" }, h("p", { class: "warnbar" }, "Secrets (payment keys, database URI, app secret) live in server environment variables and cannot be edited here."), keys.map(([k, l]) => { ins[k] = h("input", { value: r[k] ?? "" }); return field(l, ins[k]); }), h("label", { class: "row" }, inv, "Invitation-only registration"), isAdmin() ? h("button", { class: "btn primary", type: "button", onclick: go(async () => { const body = { invite_only: inv.checked }; for (const [k] of keys) { const v = ins[k].value.trim(); if (["tax_rate_bps", "points_per_unit"].includes(k)) { if (v !== "") body[k] = Number(v); } else if (v !== "") body[k] = v; } await api("/admin/settings", { method: "PUT", body }); toast("Settings saved.", "ok"); }) }, "Save settings") : null);
 };
-VIEWS.audit = async () => { if (!isAdmin()) throw new Error("Administrator role required."); const r = await api("/admin/audit"); return h("div", { class: "panel" }, table(["When", "Category", "Action", "Target", "IP", "Level"], r.logs.map((l) => h("tr", null, h("td", null, when(l.at)), h("td", null, l.category), h("td", null, l.action), h("td", null, l.target || ""), h("td", null, l.ip || ""), h("td", null, l.level === "warn" || l.level === "error" ? chip("bad") : l.level))))); };
+
 
 /* resume session after reload */
 (async () => { const t = SS.get("tok"); if (!t) return; st.base = SS.get("base") || ""; st.token = t; try { const r = await api("/auth/me"); st.user = r.user; st.csrf = r.csrf; await start(); } catch { signedOut(); } })();
