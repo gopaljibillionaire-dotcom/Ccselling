@@ -4,38 +4,300 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title>CCs shop Admin</title>
+<title>Auralis Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
 <style nonce="{{NONCE}}">
-:root{--bg:#070d1f;--panel:#101a38;--line:rgba(120,160,230,.2);--text:#e8eefc;--muted:#9fb0d4;--accent:#22d3ee;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;color-scheme:dark}
-*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:radial-gradient(900px 500px at 90% -10%,rgba(59,130,246,.2),transparent),var(--bg);color:var(--text);min-height:100vh}
-a{color:var(--accent)}h1,h2,h3{margin:0 0 .5rem}h1{font-size:1.4rem}h2{font-size:1.15rem}h3{font-size:1rem}.muted{color:var(--muted)}.small{font-size:.82rem}
-.layout{display:grid;min-height:100vh}@media(min-width:900px){.layout{grid-template-columns:220px 1fr}}
-nav.side{background:rgba(10,18,40,.9);border-right:1px solid var(--line);padding:14px;display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start}@media(min-width:900px){nav.side{flex-direction:column;flex-wrap:nowrap;position:sticky;top:0;height:100vh}}
-nav.side button{background:none;border:1px solid transparent;color:var(--text);padding:9px 12px;border-radius:10px;text-align:left;font:inherit;cursor:pointer}nav.side button[aria-current="true"]{background:rgba(34,211,238,.12);border-color:rgba(34,211,238,.4);color:var(--accent)}
-main{padding:16px;min-width:0}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:14px}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.between{justify-content:space-between}.grow{flex:1}.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
-.stat{font-size:1.5rem;font-weight:800}.btn{background:#16234a;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer;min-height:38px}.btn:hover{border-color:var(--accent)}.btn.primary{background:linear-gradient(135deg,#22d3ee,#3b82f6);color:#04111f;border:0}.btn.danger{color:var(--bad);border-color:rgba(248,113,113,.5)}.btn.sm{min-height:30px;padding:3px 9px;font-size:.8rem}.btn:disabled{opacity:.5}
-input,select,textarea{width:100%;background:#0a1330;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:8px 10px;font:inherit;min-height:38px}textarea{min-height:80px}input[type=checkbox]{width:auto;min-height:0}label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:3px}.f{margin-bottom:10px}.hint{font-size:.75rem;color:var(--muted)}
-table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-size:.72rem;text-transform:uppercase}.tw{overflow-x:auto}
-.chip{display:inline-block;font-size:.72rem;padding:2px 9px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}.chip.ok{color:var(--ok)}.chip.warn{color:var(--warn)}.chip.bad{color:var(--bad)}
-.err{color:var(--bad);min-height:1.2em;font-size:.85rem}.login{max-width:400px;margin:8vh auto;padding:0 16px}.hide{display:none!important}
-dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:16px;width:min(94vw,560px);max-height:90vh}dialog::backdrop{background:rgba(3,8,20,.7)}
-.toast{position:fixed;right:14px;bottom:14px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);padding:10px 14px;border-radius:10px;z-index:99;max-width:90vw}.toast.bad{border-left-color:var(--bad)}.toast.ok{border-left-color:var(--ok)}
-.prev{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}.prev img{width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
-.warnbar{background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.4);padding:8px 12px;border-radius:10px;margin-bottom:12px;font-size:.85rem}
+/* ---------- Design tokens ---------- */
+:root {
+  --bg: #070d1f;
+  --panel: #101a38;
+  --panel-raised: #152347;
+  --line: rgba(120, 160, 230, .2);
+  --line-soft: rgba(120, 160, 230, .12);
+  --text: #e8eefc;
+  --text-dim: #c2d0e8;
+  --muted: #9fb0d4;
+  --accent: #22d3ee;
+  --accent-soft: rgba(34, 211, 238, .12);
+  --accent-border: rgba(34, 211, 238, .4);
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --radius: 14px;
+  --radius-sm: 10px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, .35);
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+/* ---------- Base ---------- */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font: 15px/1.55 var(--font);
+  background: radial-gradient(900px 500px at 90% -10%, rgba(59, 130, 246, .18), transparent), var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1, h2, h3 { margin: 0 0 .5rem; font-weight: 600; letter-spacing: -.01em; }
+h1 { font-size: 1.45rem; }
+h2 { font-size: 1.15rem; }
+h3 { font-size: 1rem; }
+.muted { color: var(--muted); }
+.small { font-size: .82rem; }
+.hide { display: none !important; }
+::selection { background: rgba(34, 211, 238, .3); }
+
+/* ---------- Layout ---------- */
+.layout { display: grid; min-height: 100vh; }
+@media (min-width: 900px) {
+  .layout { grid-template-columns: 240px 1fr; }
+}
+main { padding: 18px; min-width: 0; }
+
+/* ---------- Sidebar nav ---------- */
+nav.side {
+  background: rgba(10, 18, 40, .92);
+  border-right: 1px solid var(--line);
+  padding: 16px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-content: flex-start;
+}
+@media (min-width: 900px) {
+  nav.side {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+}
+nav.side .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 14px;
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -.02em;
+}
+nav.side .brand .logo {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #22d3ee, #3b82f6);
+  display: grid; place-items: center;
+  color: #04111f;
+  font-size: 16px;
+  font-weight: 800;
+}
+nav.side button {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  font: inherit;
+  font-size: .9rem;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+nav.side button:hover { background: rgba(34, 211, 238, .06); color: var(--text); }
+nav.side button[aria-current="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+  font-weight: 500;
+}
+nav.side button .icon { font-size: 1.05rem; width: 1.2em; text-align: center; opacity: .8; }
+
+/* ---------- Panels & cards ---------- */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+  transition: border-color .2s ease;
+}
+.panel:hover { border-color: rgba(120, 160, 230, .3); }
+.panel-raised { background: var(--panel-raised); }
+
+/* ---------- Rows & grids ---------- */
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.between { justify-content: space-between; }
+.grow { flex: 1; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+
+/* ---------- Stats ---------- */
+.stat { font-size: 1.6rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.2; }
+.stat-label { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+
+/* ---------- Buttons ---------- */
+.btn {
+  background: #16234a;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+  font-size: .88rem;
+  cursor: pointer;
+  min-height: 38px;
+  transition: border-color .15s ease, background .15s ease, transform .1s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn:hover { border-color: var(--accent); background: #1c2c5a; }
+.btn:active { transform: scale(.97); }
+.btn.primary {
+  background: linear-gradient(135deg, #22d3ee, #3b82f6);
+  color: #04111f;
+  border: 0;
+  box-shadow: 0 4px 14px rgba(34, 211, 238, .25);
+}
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.danger { color: var(--bad); border-color: rgba(248, 113, 113, .5); }
+.btn.danger:hover { background: rgba(248, 113, 113, .1); border-color: var(--bad); }
+.btn.ghost { background: transparent; }
+.btn.sm { min-height: 30px; padding: 3px 9px; font-size: .8rem; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---------- Forms ---------- */
+input, select, textarea {
+  width: 100%;
+  background: #0a1330;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: .9rem;
+  min-height: 38px;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, .15);
+}
+textarea { min-height: 80px; resize: vertical; }
+input[type=checkbox] { width: auto; min-height: 0; accent-color: var(--accent); }
+label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: 3px; font-weight: 500; }
+.f { margin-bottom: 10px; }
+.hint { font-size: .75rem; color: var(--muted); margin-top: 3px; }
+
+/* ---------- Tables ---------- */
+table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+th, td { padding: 8px 8px; border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+tbody tr { transition: background .15s ease; }
+tbody tr:hover { background: rgba(34, 211, 238, .04); }
+.tw { overflow-x: auto; }
+
+/* ---------- Chips & badges ---------- */
+.chip {
+  display: inline-block;
+  font-size: .72rem;
+  padding: 2px 9px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.chip.ok { color: var(--ok); border-color: rgba(52, 211, 153, .35); background: rgba(52, 211, 153, .08); }
+.chip.warn { color: var(--warn); border-color: rgba(251, 191, 36, .35); background: rgba(251, 191, 36, .08); }
+.chip.bad { color: var(--bad); border-color: rgba(248, 113, 113, .35); background: rgba(248, 113, 113, .08); }
+
+/* ---------- Error & toast ---------- */
+.err { color: var(--bad); min-height: 1.2em; font-size: .85rem; }
+.login { max-width: 420px; margin: 8vh auto; padding: 0 16px; }
+.toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  z-index: 99;
+  max-width: 90vw;
+  box-shadow: var(--shadow);
+  animation: slideIn .25s ease;
+}
+.toast.bad { border-left-color: var(--bad); }
+.toast.ok { border-left-color: var(--ok); }
+@keyframes slideIn { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* ---------- Dialog ---------- */
+dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  width: min(94vw, 620px);
+  max-height: 90vh;
+  padding: 20px;
+  box-shadow: var(--shadow);
+  animation: fadeUp .2s ease;
+}
+dialog::backdrop { background: rgba(3, 8, 20, .75); backdrop-filter: blur(3px); }
+@keyframes fadeUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* ---------- Image preview ---------- */
+.prev { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.prev img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
+
+/* ---------- Warning bar ---------- */
+.warnbar {
+  background: rgba(251, 191, 36, .1);
+  border: 1px solid rgba(251, 191, 36, .35);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+  font-size: .85rem;
+}
+
+/* ---------- Scrollbar ---------- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(120, 160, 230, .25); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(120, 160, 230, .4); }
+
+/* ---------- Login tweaks ---------- */
+.login .panel { padding: 24px; }
+.login h1 { font-size: 1.6rem; }
 </style>
 </head>
 <body>
 <div id="loginView" class="login">
   <div class="panel">
     <h1>Administration</h1>
-    <p class="muted small">Sign in with your staff account. Administrators must complete multi-factor authentication. This page holds no credentials; every action is authorised by the backend.</p>
+    <p class="muted small">Sign in with your staff account. Admins need multi‑factor authentication. This page holds no credentials; every action is authorised by the backend.</p>
     <div class="f"><label for="apiBase">Server URL</label><input id="apiBase" type="url" placeholder="https://your-app.herokuapp.com" autocomplete="off"><div class="hint">Leave blank when this page is served by the backend itself.</div></div>
     <form id="loginForm" novalidate>
       <div class="f"><label for="em">Email</label><input id="em" type="email" autocomplete="username" required></div>
       <div class="f"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
       <div id="mfaBox" class="hide">
-        <div id="mfaSetup" class="hide"><p class="small">Scan this URI with an authenticator app (or enter the secret manually), then enter the 6-digit code.</p><div class="f"><label>Secret</label><input id="mfaSecret" readonly></div><div class="f"><label>otpauth URI</label><textarea id="mfaUri" readonly></textarea></div></div>
+        <div id="mfaSetup" class="hide"><p class="small">Scan this URI with an authenticator app (or enter the secret manually), then enter the 6‑digit code.</p><div class="f"><label>Secret</label><input id="mfaSecret" readonly></div><div class="f"><label>otpauth URI</label><textarea id="mfaUri" readonly></textarea></div></div>
         <div class="f"><label for="otp">Authentication code</label><input id="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
       </div>
       <div id="loginErr" class="err" role="alert"></div>
@@ -46,7 +308,7 @@ dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);bo
 
 <div id="appView" class="layout hide">
   <nav class="side" id="side" aria-label="Admin sections"></nav>
-  <main><div class="row between"><h1 id="title">Overview</h1><div class="row"><span class="chip" id="who"></span><button class="btn sm" id="logoutBtn" type="button">Sign out</button></div></div><div id="view"></div></main>
+  <main><div class="row between"><h1 id="title">Overview</h1><div class="row"><span class="chip" id="who"></span><button class="btn sm ghost" id="logoutBtn" type="button">Sign out</button></div></div><div id="view"></div></main>
 </div>
 <dialog id="dlg"></dialog>
 <script nonce="{{NONCE}}">
@@ -72,7 +334,7 @@ async function api(path, { method = "GET", body, raw } = {}) {
 }
 const go = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, "bad"); } };
 function confirmBox(msg) { return new Promise((res) => { const d = $("#dlg"); clear(d).append(h("h3", null, "Please confirm"), h("p", null, msg), h("div", { class: "row" }, h("button", { class: "btn danger", type: "button", onclick: () => { d.close(); res(true); } }, "Confirm"), h("button", { class: "btn", type: "button", onclick: () => { d.close(); res(false); } }, "Cancel"))); d.onclose = () => res(false); d.showModal(); }); }
-function modal(title, node) { const d = $("#dlg"); clear(d).append(h("div", { class: "row between" }, h("h3", null, title), h("button", { class: "btn sm", type: "button", onclick: () => d.close() }, "✕")), node); d.onclose = null; d.showModal(); return d; }
+function modal(title, node) { const d = $("#dlg"); clear(d).append(h("div", { class: "row between" }, h("h3", null, title), h("button", { class: "btn sm ghost", type: "button", onclick: () => d.close() }, "✕")), node); d.onclose = null; d.showModal(); return d; }
 const field = (label, input, hint) => h("div", { class: "f" }, h("label", null, label), input, hint ? h("div", { class: "hint" }, hint) : null);
 const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("thead", null, h("tr", null, heads.map((x) => h("th", null, x)))), h("tbody", null, rows.length ? rows : h("tr", null, h("td", { colspan: heads.length, class: "muted" }, "Nothing here yet.")))));
 
@@ -98,12 +360,21 @@ function resetLoginUi() { $("#mfaBox").classList.add("hide"); $("#loginBtn").tex
 $("#logoutBtn").addEventListener("click", go(async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} signedOut(); }));
 
 /* ---------- shell ---------- */
-const SECTIONS = [["overview", "Overview"], ["guide", "Guide"], ["products", "Products"], ["fields", "Product fields"], ["categories", "Categories"], ["countries", "Countries"], ["inventory", "Inventory"], ["orders", "Orders"], ["payments", "Payments"], ["users", "Customers"], ["invites", "Invitations"], ["tiers", "Membership"], ["tickets", "Support"], ["reviews", "Reviews"], ["settings", "Settings"], ["audit", "Audit log"]];
+const SECTIONS = [
+  ["overview", "Overview", "◈"], ["products", "Products", "▦"], ["fields", "Product fields", "⚙"],
+  ["categories", "Categories", "▤"], ["countries", "Countries", "🌐"], ["inventory", "Inventory", "📦"],
+  ["orders", "Orders", "🧾"], ["payments", "Payments", "💳"], ["users", "Customers", "👤"],
+  ["invites", "Invitations", "✉"], ["tiers", "Membership", "🏅"], ["tickets", "Support", "💬"],
+  ["reviews", "Reviews", "⭐"], ["settings", "Settings", "🔧"], ["audit", "Audit log", "📋"]
+];
 const isAdmin = () => ["admin", "superadmin"].includes(st.user.role);
 async function start() {
   $("#loginView").classList.add("hide"); $("#appView").classList.remove("hide"); $("#who").textContent = `${st.user.email} · ${st.user.role}`;
   const [c, k] = await Promise.all([api("/admin/countries"), api("/admin/categories")]); st.countries = c.countries; st.cats = k.categories;
-  const side = clear($("#side")); SECTIONS.forEach(([k2, l]) => side.append(h("button", { type: "button", "data-k": k2, onclick: () => show(k2) }, l))); show("overview");
+  const side = clear($("#side"));
+  side.append(h("div", { class: "brand" }, h("div", { class: "logo" }, "A"), "Auralis Admin"));
+  SECTIONS.forEach(([k2, l, icon]) => side.append(h("button", { type: "button", "data-k": k2, onclick: () => show(k2) }, h("span", { class: "icon" }, icon), l)));
+  show("overview");
 }
 async function show(k) {
   [...$("#side").children].forEach((b) => b.setAttribute("aria-current", String(b.dataset.k === k))); $("#title").textContent = SECTIONS.find((s) => s[0] === k)[1];
@@ -113,37 +384,19 @@ async function show(k) {
 
 /* ---------- views ---------- */
 const VIEWS = {};
-
-VIEWS.guide = async () => {
-  const guideText = `
-    <div class="panel">
-      <h2>Welcome to the CCs shop Admin Guide</h2>
-      <p>This panel allows you to manage every aspect of your store. Below is a breakdown of each section:</p>
-      <ul>
-        <li><strong>Overview:</strong> A quick dashboard showing your store's health, including total customers, active products, pending orders, and recent security events.</li>
-        <li><strong>Products:</strong> Add, edit, and manage your inventory. You can set prices, upload images, assign categories, and toggle products between Draft and Published.</li>
-        <li><strong>Product Fields:</strong> Create custom data fields for different product categories (e.g., "Size" for clothes, "RAM" for electronics). These fields appear dynamically when adding a product.</li>
-        <li><strong>Categories:</strong> Organize your store. You can create top-level categories and subcategories, set the order they appear, and enable/disable them.</li>
-        <li><strong>Countries:</strong> Manage the regions you ship to. Products can be filtered by country on the storefront.</li>
-        <li><strong>Inventory:</strong> Track stock levels. You can adjust stock manually, export/import CSV files for bulk updates, and view a log of every movement (sales, reserves, adjustments).</li>
-        <li><strong>Orders:</strong> View customer orders. You can update their fulfilment status (e.g., Shipped, Delivered) and issue refunds to the customer's wallet.</li>
-        <li><strong>Payments:</strong> Review all payment attempts. The system automatically verifies crypto payments (via Plisio) and credits the user's wallet. You can also re-trigger verification here if a payment is stuck.</li>
-        <li><strong>Customers:</strong> View registered users. You can suspend accounts, revoke active sessions, and view their reward history.</li>
-        <li><strong>Invitations:</strong> If the store is in Invite-Only mode, you can approve or reject applications here.</li>
-        <li><strong>Membership:</strong> Configure your VIP tiers (e.g., Basic, Gold, VIP). Set the spending thresholds required to reach a tier and the discount/reward multipliers they unlock.</li>
-        <li><strong>Support:</strong> Manage customer support tickets. You can reply directly to customers here.</li>
-        <li><strong>Settings:</strong> Update your store's branding (name, tagline), support URLs, and toggle Invite-Only mode.</li>
-        <li><strong>Audit Log:</strong> A secure, append-only history of every important action taken in the admin panel. This ensures accountability.</li>
-      </ul>
-    </div>
-  `;
-  return h("div", null, h("div", { class: "panel", innerHTML: guideText }));
-};
-
 VIEWS.overview = async () => {
-  const s = await api("/admin/stats"); const c = s.currency; const tile = (l, v) => h("div", { class: "panel" }, h("div", { class: "muted small" }, l), h("div", { class: "stat" }, v));
-  return h("div", null, h("div", { class: "grid" }, tile("Customers", s.customers_total), tile("Active sessions (30d)", s.customers_active), tile("Published products", s.products_published), tile("Low stock", s.low_stock), tile("Out of stock", s.out_of_stock), tile("Orders", s.orders_total), tile("Pending orders", s.orders_pending), tile("Completed orders", s.orders_completed), tile("Pending payments", s.payments_pending), tile("Verified revenue (net)", money(s.revenue_minor, c)), tile("Refunds", money(s.refunds_minor, c))),
-    h("div", { class: "grid" }, h("div", { class: "panel" }, h("h2", null, "Recent security events"), table(["When", "Event", "IP"], s.recent_security_events.map((e) => h("tr", null, h("td", null, when(e.at)), h("td", null, e.action, " ", e.level === "warn" || e.level === "error" ? chip("bad") : null), h("td", null, e.ip || ""))))), h("div", { class: "panel" }, h("h2", null, "Recent inventory changes"), table(["When", "SKU", "Type", "Δ"], s.recent_inventory.map((m) => h("tr", null, h("td", null, when(m.at)), h("td", null, m.sku), h("td", null, m.type), h("td", null, String(m.delta))))))));
+  const s = await api("/admin/stats"); const c = s.currency;
+  const tile = (l, v, accent = false) => h("div", { class: "panel", style: accent ? "border-color:var(--accent-border)" : "" }, h("div", { class: "stat-label" }, l), h("div", { class: "stat", style: accent ? "color:var(--accent)" : "" }, v));
+  return h("div", null, h("div", { class: "grid" },
+    tile("Customers", s.customers_total), tile("Active sessions (30d)", s.customers_active),
+    tile("Published products", s.products_published), tile("Low stock", s.low_stock),
+    tile("Out of stock", s.out_of_stock), tile("Orders", s.orders_total),
+    tile("Pending orders", s.orders_pending), tile("Completed orders", s.orders_completed),
+    tile("Pending payments", s.payments_pending), tile("Verified revenue (net)", money(s.revenue_minor, c), true),
+    tile("Refunds", money(s.refunds_minor, c))),
+    h("div", { class: "grid" },
+      h("div", { class: "panel" }, h("h2", null, "Recent security events"), table(["When", "Event", "IP"], s.recent_security_events.map((e) => h("tr", null, h("td", null, when(e.at)), h("td", null, e.action, " ", e.level === "warn" || e.level === "error" ? chip("bad") : null), h("td", null, e.ip || ""))))),
+      h("div", { class: "panel" }, h("h2", null, "Recent inventory changes"), table(["When", "SKU", "Type", "Δ"], s.recent_inventory.map((m) => h("tr", null, h("td", null, when(m.at)), h("td", null, m.sku), h("td", null, m.type), h("td", null, String(m.delta))))))));
 };
 
 /* products + dynamic form */
