@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -119,6 +119,7 @@ async def ensure_indexes(d: Any) -> None:
     await ix("audit_logs", [("category", A), ("created_at", D)])
     await ix("notifications", [("user_id", A), ("created_at", D)])
     await ix("newsletter", [("email", A)], unique=True)
+    await ix("captchas", [("expires_at", A)], expireAfterSeconds=0)
 
 
 DEFAULT_TIERS = [
@@ -324,11 +325,15 @@ class RegisterIn(Strict):
     invite_code: Optional[str] = Field(default=None, max_length=100)
     referral_code: Optional[str] = Field(default=None, max_length=20)
     accept_terms: bool
+    captcha_id: str = Field(default="", max_length=80)
+    captcha_answer: str = Field(default="", max_length=10)
 
 
 class LoginIn(Strict):
     email: str
     password: str = Field(max_length=128)
+    captcha_id: str = Field(default="", max_length=80)
+    captcha_answer: str = Field(default="", max_length=10)
 
 
 class CodeIn(Strict):
@@ -405,6 +410,12 @@ class VariantIn(Strict):
     stock: int = Field(default=0, ge=0, le=1_000_000)
 
 
+class DeliveryItem(Strict):
+    """One copy of what the buyer receives after payment (link, account, key...)."""
+    text: str = Field(min_length=1, max_length=5000)
+    vars: Dict[str, str] = Field(default_factory=dict, max_length=20)
+
+
 class ProductIn(Strict):
     name: str = Field(min_length=2, max_length=140)
     short_description: str = Field(default="", max_length=240)
@@ -424,6 +435,8 @@ class ProductIn(Strict):
     status: Literal["draft", "published"] = "draft"
     delivery_info: str = Field(default="", max_length=500)
     refund_policy: str = Field(default="", max_length=1000)
+    delivery_template: str = Field(default="", max_length=5000)
+    delivery_items: List[DeliveryItem] = Field(default_factory=list, max_length=500)
 
 
 class StatusIn(Strict):
@@ -760,6 +773,12 @@ async def build_product_doc(body: ProductIn, existing: Optional[dict] = None) ->
         "tags": [sec.clean_text(t, 30) for t in body.tags], "featured": body.featured, "status": body.status,
         "delivery_info": sec.clean_text(body.delivery_info, 500), "refund_policy": sec.clean_text(body.refund_policy, 1000),
         "search_blob": " ".join(blob_parts), "updated_at": utcnow(),
+        "delivery": {
+            "template": sec.clean_text(body.delivery_template, 5000, multiline=True, label="Delivery template"),
+            "items": [{"text": sec.clean_text(i.text, 5000, multiline=True, label="Delivery content"),
+                       "vars": {sec.assert_safe_key(k): sec.clean_text(v, 300, multiline=True, label="Placeholder value") for k, v in i.vars.items()}}
+                      for i in body.delivery_items],
+        },
     }
     return doc
 
@@ -904,6 +923,14 @@ async def price_cart(user: dict, items: List[dict], strict: bool = False) -> dic
     """Server-side pricing from current DB data. Client-supplied prices are never read."""
     if not items:
         return {"lines": [], "subtotal_minor": 0, "member_discount_minor": 0, "tax_minor": 0, "total_minor": 0, "currency": settings.default_currency}
+    merged: Dict[Tuple[str, str], dict] = {}
+    for raw in items:
+        key = (str(raw["product_id"]), str(raw["sku"]))
+        if key in merged:
+            merged[key]["qty"] = min(20, merged[key]["qty"] + int(raw["qty"]))
+        else:
+            merged[key] = {"product_id": key[0], "sku": key[1], "qty": max(1, min(20, int(raw["qty"])))}
+    items = list(merged.values())
     ids = [oid(i["product_id"]) for i in items]
     prods = {p["_id"]: p async for p in db()["products"].find({"_id": {"$in": ids}})}
     lines, problems = [], []
@@ -937,7 +964,9 @@ def public_order(o: dict, pay: Optional[dict] = None) -> dict:
          "subtotal_minor": o["subtotal_minor"], "member_discount_minor": o["member_discount_minor"], "tax_minor": o["tax_minor"],
          "total_minor": o["total_minor"], "currency": o["currency"], "payment_method": o["payment_method"],
          "created_at": iso(o["created_at"]), "paid_at": iso(o.get("paid_at")), "points_earned": o.get("points_earned", 0),
-         "refund_total_minor": o.get("refund_total_minor", 0), "history": [{"status": h["status"], "at": iso(h["at"])} for h in o.get("history", [])]}
+         "refund_total_minor": o.get("refund_total_minor", 0),
+         "deliveries": o.get("delivery_map", {}) if o["status"] in ("paid", "refunded") else {},
+         "history": [{"status": h["status"], "at": iso(h["at"])} for h in o.get("history", [])]}
     if pay and o["status"] in ("created", "pending") and pay.get("payment_url"):
         d["payment_url"] = pay["payment_url"]
     return d
@@ -984,39 +1013,7 @@ async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
     return result
 
 
-async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
-    await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
-
-    # Plisio expects amount in standard units (e.g., 25.00 for $25.00)
-    amount = float(Decimal(amount_minor) / 100)
-
-    # Core fix: use /invoices/new, and for fiat currency conversion, pass source_currency/source_amount
-    data = await plisio_request("/invoices/new", {
-        "source_currency": settings.default_currency,
-        "source_amount": str(amount),  # Plisio expects string type
-        "order_name": description[:100],
-        "order_number": reference,     # Must be unique, your order number meets the requirement
-        "email": user["email"],
-        # Add ?json=true so Plisio returns JSON data, making Webhook verification easier
-        "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook?json=true",
-        "success_invoice_url": f"{settings.public_app_url}/?order={reference}",
-        "fail_invoice_url": f"{settings.public_app_url}/?order={reference}&status=failed",
-        "expire_min": "60"  # Invoice validity period (minutes)
-    })
-
-    # Plisio returns txn_id and invoice_url at the top level of "data"
-    txn_id = data.get("txn_id") or data.get("id")
-    invoice_url = data.get("invoice_url") or data.get("url", "")
-
-    if not txn_id:
-        log.error("Plisio response missing txn_id: %s", json.dumps(data)[:500])
-        raise HTTPException(502, "Payment provider returned an unexpected response (missing transaction ID).")
-
-    if not invoice_url:
-        log.error("Plisio response missing invoice_url: %s", json.dumps(data)[:500])
-        raise HTTPException(502, "Payment provider returned an unexpected response (missing payment URL).")
-
-async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
+async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str, success_path: str = "") -> dict:
     await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
 
     amount = float(Decimal(amount_minor) / 100)
@@ -1028,7 +1025,7 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
         "order_number": reference,
         "email": user["email"],
         "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook?json=true",
-        "success_invoice_url": f"{settings.public_app_url}/?order={reference}",
+        "success_invoice_url": f"{settings.public_app_url}{success_path or ('/?order=' + reference)}",
         "fail_invoice_url": f"{settings.public_app_url}/?order={reference}&status=failed",
         "expire_min": "60",
     })
@@ -1091,16 +1088,23 @@ def map_provider_status(raw: str) -> str:
 
 
 def verify_amounts(pay: dict, data: dict) -> Optional[str]:
-    """Return None when provider data is consistent with our record, else a reason string."""
+    """Return None when provider data is consistent with our record, else a reason string.
+    Plisio operation objects expose the fiat side as source_sum/source_currency and may omit
+    order_number on some responses, so those fields are checked only when present."""
+    raw_amount = data.get("source_sum")
+    if raw_amount in (None, "", 0, "0"):
+        raw_amount = data.get("actual_sum") or data.get("amount")
+    raw_currency = data.get("source_currency") or data.get("currency")
     try:
-        paid = Decimal(str(data.get("amount")))
+        paid = Decimal(str(raw_amount))
     except (InvalidOperation, TypeError):
         return "amount missing or malformed"
     if paid != Decimal(pay["expected_minor"]) / 100:
         return f"amount mismatch (expected {minor_to_str(pay['expected_minor'])}, provider {paid})"
-    if str(data.get("currency", "")).upper() != pay["currency"].upper():
+    if str(raw_currency or "").upper() != pay["currency"].upper():
         return "currency mismatch"
-    if str(data.get("order_number", "")) != pay["reference"]:
+    order_number = data.get("order_number")
+    if order_number not in (None, "") and str(order_number) != pay["reference"]:
         return "order reference mismatch"
     return None
 
@@ -1157,6 +1161,18 @@ async def claim_flag(order_id: ObjectId, flag: str) -> Optional[dict]:
     return await db()["orders"].find_one_and_update({"_id": order_id, flag: {"$ne": True}}, {"$set": {flag: True}}, return_document=ReturnDocument.AFTER)
 
 
+def render_delivery_text(text: str, vars: Dict[str, str], order: dict, user: Optional[dict], sku: str) -> str:
+    """Fill {placeholders} in a delivery copy. Built-ins: {order} {email} {name} {sku};
+    custom key=value pairs (e.g. name=Gopal) override or extend them."""
+    values = {"order": order["number"], "email": (user or {}).get("email", ""), "name": (user or {}).get("name", ""), "sku": sku}
+    values.update({k: str(v) for k, v in (vars or {}).items()})
+
+    def repl(m: "re.Match[str]") -> str:
+        return values.get(m.group(1), m.group(0))
+
+    return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", repl, text)
+
+
 async def complete_paid_steps(order: dict) -> None:
     """Every step is claim-guarded, so webhook retries / reconciliation can re-run this safely."""
     if await claim_flag(order["_id"], "inventory_committed"):
@@ -1174,11 +1190,33 @@ async def complete_paid_steps(order: dict) -> None:
                 except DuplicateKeyError:
                     pass
             await notify(order["user_id"], f"Order {order['number']} confirmed", "Your payment was verified. Thank you!")
+    if await claim_flag(order["_id"], "delivery_assigned"):
+        user = await db()["users"].find_one({"_id": order["user_id"]})
+        for it in order["items"]:
+            p = await db()["products"].find_one({"_id": it["product_id"]}, {"delivery": 1})
+            delivery = (p or {}).get("delivery") or {}
+            assigned: List[str] = []
+            for _ in range(it["qty"]):  # hand out one copy per unit sold, in order
+                if not delivery.get("items"):
+                    break
+                item = delivery["items"][0]
+                await db()["products"].update_one({"_id": p["_id"]}, {"$pop": {"delivery.items": -1}})
+                delivery["items"] = delivery["items"][1:]
+                assigned.append(render_delivery_text(item.get("text", ""), item.get("vars") or {}, order, user, it["sku"]))
+            if not assigned and delivery.get("template"):
+                assigned.append(render_delivery_text(delivery["template"], {}, order, user, it["sku"]))
+            if assigned:
+                await db()["orders"].update_one({"_id": order["_id"]}, {"$set": {f"delivery_map.{it['sku']}": assigned}})
 
 
 async def sweep_once() -> None:
     """Reconciliation + reservation expiry. Safe to run concurrently on many dynos."""
     now = utcnow()
+    async for pay in db()["payment_records"].find({"status": "pending", "purpose": "wallet_deposit", "provider": "plisio"}).limit(20):
+        try:
+            await apply_provider_state(pay, await provider_state(pay["track_id"]), "sweeper")
+        except HTTPException:
+            continue  # provider outage: retry next sweep
     async for order in db()["orders"].find({"status": {"$in": ["created", "pending"]}, "reservation_expires_at": {"$lt": now}}).limit(50):
         pay = await db()["payment_records"].find_one({"order_id": order["_id"]})
         if pay and pay.get("track_id") and settings.plisio_enabled:
@@ -1249,9 +1287,58 @@ async def public_config() -> dict:
 
 
 # ---- auth -------------------------------------------------------------------
+CAPTCHA_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # unambiguous symbols only
+_CAPTCHA_COLORS = ("#22d3ee", "#3b82f6", "#34d399", "#fbbf24", "#f87171", "#e8eefc")
+
+
+def captcha_svg(code: str) -> str:
+    """Text-symbol captcha drawn as inline SVG. No image hosting, no sticker art."""
+    w, h = 220, 70
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-label="Security check">',
+        '<rect width="100%" height="100%" rx="12" fill="#0b1430"/>',
+    ]
+    for _ in range(6):
+        x1, y1, x2, y2 = secrets.randbelow(w), secrets.randbelow(h), secrets.randbelow(w), secrets.randbelow(h)
+        parts.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{secrets.choice(_CAPTCHA_COLORS)}" stroke-opacity="0.35" stroke-width="1.6"/>')
+    for i, ch in enumerate(code):
+        x = 24 + i * 36 + secrets.randbelow(10) - 5
+        y = 48 + secrets.randbelow(12) - 6
+        rot = secrets.randbelow(50) - 25
+        parts.append(
+            f'<text x="{x}" y="{y}" font-family="Verdana, DejaVu Sans, sans-serif" font-size="34" font-weight="700" '
+            f'fill="{secrets.choice(_CAPTCHA_COLORS[:5])}" transform="rotate({rot} {x} {y})">{ch}</text>'
+        )
+    for _ in range(24):
+        parts.append(f'<circle cx="{secrets.randbelow(w)}" cy="{secrets.randbelow(h)}" r="1.2" fill="{secrets.choice(_CAPTCHA_COLORS)}" fill-opacity="0.5"/>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+async def verify_captcha(captcha_id: str, answer: str, request: Request) -> None:
+    """Single-use, 5-minute captcha. Fails closed; consumed on attempt."""
+    cid = (captcha_id or "")[:80]
+    ans = (answer or "").strip().lower()
+    if not cid or not ans:
+        raise HTTPException(422, "Please complete the security check (captcha).")
+    doc = await db()["captchas"].find_one_and_delete({"_id": cid})
+    if not doc or doc["expires_at"] < utcnow() or str(doc["code"]).lower() != ans:
+        await audit(request, "auth.captcha_failed", category="security", level="warn")
+        raise HTTPException(400, "Security code is incorrect or has expired. Please try again.")
+
+
+@api.get("/auth/captcha")
+async def auth_captcha(request: Request) -> dict:
+    """Fresh text-symbol captcha for the login / registration forms."""
+    await S.limiter.enforce("captcha", sec.client_ip(request), 60, 900)
+    code = "".join(secrets.choice(CAPTCHA_ALPHABET) for _ in range(5))
+    cid = new_token(16)
+    await db()["captchas"].insert_one({"_id": cid, "code": code, "expires_at": utcnow() + timedelta(minutes=5)})
+    return {"captcha_id": cid, "svg": captcha_svg(code)}
 @api.post("/auth/register", status_code=201)
 async def register(body: RegisterIn, request: Request, response: Response) -> dict:
     await sensitive(request, "register")
+    await verify_captcha(body.captcha_id, body.captcha_answer, request)
     if not body.accept_terms:
         raise HTTPException(422, "You must accept the terms to register")
     email = sec.clean_email(body.email)
@@ -1285,6 +1372,7 @@ async def register(body: RegisterIn, request: Request, response: Response) -> di
 
 @api.post("/auth/login")
 async def login(body: LoginIn, request: Request, response: Response) -> dict:
+    await verify_captcha(body.captcha_id, body.captcha_answer, request)
     ip, email = sec.client_ip(request), sec.clean_email(body.email) if sec.EMAIL_RE.match(body.email or "") else "invalid"
     ident = f"{email}|{ip}"
     await S.limiter.guard_failures("login", ident, settings.rl_login_max, settings.rl_login_window)
@@ -1728,6 +1816,24 @@ async def cancel_order(number: str, request: Request, user: dict = Depends(curre
     return {"order": public_order(fresh)}
 
 
+@api.post("/orders/{number}/check")
+async def order_payment_check(number: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Buyer-triggered instant verification: asks Plisio for the live state and applies it immediately."""
+    await S.limiter.enforce("paycheck", str(user["_id"]), 60, 900)
+    o = await db()["orders"].find_one({"number": sec.clean_text(number, 20).upper(), "user_id": user["_id"]})
+    if not o:
+        raise HTTPException(404, "Order not found")
+    pay = await db()["payment_records"].find_one({"order_id": o["_id"]})
+    if o["status"] in ("created", "pending") and pay and pay.get("provider") == "plisio" and pay.get("track_id") and settings.plisio_enabled:
+        try:
+            await apply_provider_state(pay, await provider_state(pay["track_id"]), "buyer-check")
+        except HTTPException:
+            pass  # provider hiccup: stay pending, the sweeper keeps retrying
+        o = await db()["orders"].find_one({"_id": o["_id"]})
+        pay = await db()["payment_records"].find_one({"order_id": o["_id"]})
+    return {"order": public_order(o, pay)}
+
+
 # ---- payments -----------------------------------------------------------------
 @api.post("/payments/plisio/webhook")
 async def plisio_webhook(request: Request) -> Response:
@@ -1784,9 +1890,22 @@ async def wallet_deposit(body: DepositIn, request: Request, user: dict = Depends
     minor = money_to_minor(body.amount, "Amount", allow_zero=False)
     if minor < settings.wallet_deposit_min_minor or minor > settings.wallet_deposit_max_minor:
         raise HTTPException(422, f"Deposits must be between {minor_to_str(settings.wallet_deposit_min_minor)} and {minor_to_str(settings.wallet_deposit_max_minor)}")
-    pay = await create_invoice(user, "DEP-" + secrets.token_hex(5).upper(), minor, "wallet_deposit", None, "Wallet top-up")
+    pay = await create_invoice(user, "DEP-" + secrets.token_hex(5).upper(), minor, "wallet_deposit", None, "Wallet top-up", "/#/account/wallet")
     await audit(request, "wallet.deposit_started", user["_id"], target=pay["reference"], category="payment")
     return {"payment_url": pay["payment_url"], "reference": pay["reference"]}
+
+
+@api.post("/wallet/check")
+async def wallet_check(request: Request, user: dict = Depends(current_user)) -> dict:
+    """Instantly verify pending wallet top-ups with Plisio and return the fresh balance."""
+    await S.limiter.enforce("paycheck", str(user["_id"]), 60, 900)
+    if settings.plisio_enabled:
+        async for pay in db()["payment_records"].find({"user_id": user["_id"], "purpose": "wallet_deposit", "status": "pending", "provider": "plisio"}).sort("created_at", -1).limit(5):
+            try:
+                await apply_provider_state(pay, await provider_state(pay["track_id"]), "wallet-check")
+            except HTTPException:
+                continue  # provider outage: try again later
+    return await wallet(user)
 
 
 @api.get("/membership")
