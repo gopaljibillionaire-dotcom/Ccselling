@@ -810,7 +810,7 @@ PRODUCT_SORTS = {"newest": [("created_at", DESCENDING)], "price_asc": [("final_p
 
 
 # =============================================================================
-# 6. INVENTORY (atomic conditional updates; invariant available + reserved == stock)
+# 6. INVENTORY (atomic conditional updates; stock is taken when payment is verified - nothing is reserved)
 # =============================================================================
 async def log_movement(product_id: ObjectId, sku: str, kind: str, d_stock: int, d_avail: int, d_res: int,
                        reason: str = "", actor: Any = None, order_id: Optional[ObjectId] = None) -> None:
@@ -837,37 +837,39 @@ async def adjust_stock(pid: ObjectId, sku: str, delta: int, reason: str, actor: 
     await log_movement(pid, sku, kind, delta, delta, 0, reason, actor)
 
 
-async def reserve_lines(lines: List[dict], order_id: ObjectId) -> None:
-    done: List[dict] = []
-    for ln in lines:
-        res = await db()["products"].update_one(
-            {"_id": ln["product_id"], "status": "published", "variants": {"$elemMatch": {"sku": ln["sku"], "available": {"$gte": ln["qty"]}}}},
-            {"$inc": {"variants.$.available": -ln["qty"], "variants.$.reserved": ln["qty"]}})
-        if res.modified_count == 0:
-            await release_lines(done, order_id, log_it=False)
-            raise HTTPException(409, f"Insufficient stock for {ln['name']}")
-        done.append(ln)
-        await log_movement(ln["product_id"], ln["sku"], "reserve", 0, -ln["qty"], ln["qty"], "checkout", None, order_id)
+async def commit_sale(order: dict) -> bool:
+    """Take the stock at the moment payment is verified (there is no reservation while people shop or wait to pay).
 
-
-async def release_lines(lines: List[dict], order_id: ObjectId, log_it: bool = True) -> None:
-    for ln in lines:
-        res = await db()["products"].update_one(
-            {"_id": ln["product_id"], "variants": {"$elemMatch": {"sku": ln["sku"], "reserved": {"$gte": ln["qty"]}}}},
-            {"$inc": {"variants.$.available": ln["qty"], "variants.$.reserved": -ln["qty"]}})
-        if res.modified_count and log_it:
-            await log_movement(ln["product_id"], ln["sku"], "release", 0, ln["qty"], -ln["qty"], "reservation released", None, order_id)
-
-
-async def commit_sale(order: dict) -> None:
+    Each line is decremented atomically only if enough is still available. If any line is already gone
+    (someone else paid first), the lines taken so far are put back and False is returned.
+    """
+    taken: List[dict] = []
     for it in order["items"]:
         res = await db()["products"].update_one(
-            {"_id": it["product_id"], "variants": {"$elemMatch": {"sku": it["sku"], "reserved": {"$gte": it["qty"]}}}},
-            {"$inc": {"variants.$.reserved": -it["qty"], "variants.$.stock": -it["qty"], "variants.$.sold": it["qty"], "sold_total": it["qty"]}})
+            {"_id": it["product_id"], "variants": {"$elemMatch": {"sku": it["sku"], "available": {"$gte": it["qty"]}}}},
+            {"$inc": {"variants.$.stock": -it["qty"], "variants.$.available": -it["qty"], "variants.$.sold": it["qty"], "sold_total": it["qty"]}})
         if res.modified_count:
-            await log_movement(it["product_id"], it["sku"], "sale", -it["qty"], 0, -it["qty"], "payment verified", None, order["_id"])
-        else:
-            await audit(None, "inventory.commit_anomaly", target=order["number"], meta={"sku": it["sku"]}, category="security", level="error")
+            taken.append(it)
+            await log_movement(it["product_id"], it["sku"], "sale", -it["qty"], -it["qty"], 0, "payment verified", None, order["_id"])
+            continue
+        for t in taken:  # undo the lines already taken
+            await db()["products"].update_one(
+                {"_id": t["product_id"], "variants.sku": t["sku"]},
+                {"$inc": {"variants.$.stock": t["qty"], "variants.$.available": t["qty"], "variants.$.sold": -t["qty"], "sold_total": -t["qty"]}})
+            await log_movement(t["product_id"], t["sku"], "sale_undo", t["qty"], t["qty"], 0, "order sold out - undone", None, order["_id"])
+        return False
+    return True
+
+
+async def refund_sold_out(order: dict) -> None:
+    """Paid, but the item was bought by someone else a moment earlier: give the money back as wallet credit."""
+    fresh = await transition("orders", order["_id"], "refunded", note="item sold out before payment cleared", extra={"refund_total_minor": order["total_minor"]})
+    if fresh is None:
+        return
+    await wallet_post(order["user_id"], order["total_minor"], "refund", f"refund:{order['number']}", ref=order["number"], note="item sold out")
+    await db()["payment_records"].update_one({"order_id": order["_id"], "status": "paid"}, {"$set": {"status": "refunded", "updated_at": utcnow()}})
+    await notify(order["user_id"], f"Order {order['number']} refunded", "Someone bought this item a moment before your payment cleared. The full amount was added to your wallet.")
+    await audit(None, "order.sold_out_refund", target=order["number"], category="order", level="warn")
 
 
 # =============================================================================
@@ -1150,9 +1152,7 @@ async def apply_provider_state(pay: dict, data: dict, source: str) -> str:
             await settle_order(pay)
         return "paid"
     if pay.get("order_id"):
-        order = await transition("orders", pay["order_id"], new, note=f"payment {new}")
-        if order:
-            await release_once(order)
+        await transition("orders", pay["order_id"], new, note=f"payment {new}")
     return new
 
 
@@ -1169,13 +1169,6 @@ async def refresh_payment(pay: dict, source: str = "poll", min_gap: float = 4.0)
     except HTTPException:
         return "pending"
     return await apply_provider_state(pay, data, source)
-
-
-async def release_once(order: dict) -> None:
-    claimed = await db()["orders"].find_one_and_update({"_id": order["_id"], "reservation_released": {"$ne": True}, "inventory_committed": {"$ne": True}},
-                                                       {"$set": {"reservation_released": True}})
-    if claimed:
-        await release_lines(order["items"], order["_id"])
 
 
 async def settle_order(pay: dict) -> None:
@@ -1209,7 +1202,9 @@ async def issue_delivery(order: dict) -> None:
 async def complete_paid_steps(order: dict) -> None:
     """Every step is claim-guarded, so webhook retries / reconciliation can re-run this safely."""
     if await claim_flag(order["_id"], "inventory_committed"):
-        await commit_sale(order)
+        if not await commit_sale(order):
+            await refund_sold_out(order)
+            return
     if await claim_flag(order["_id"], "delivery_issued"):
         await issue_delivery(order)
     if await claim_flag(order["_id"], "rewards_issued"):
@@ -1228,7 +1223,7 @@ async def complete_paid_steps(order: dict) -> None:
 
 
 async def sweep_once() -> None:
-    """Reconciliation + reservation expiry. Safe to run concurrently on many dynos."""
+    """Reconciliation + expiry of unpaid orders (no stock is held for them). Safe to run concurrently on many dynos."""
     now = utcnow()
     if settings.plisio_enabled:
         async for pay in db()["payment_records"].find({"status": "pending", "provider": "plisio", "created_at": {"$gt": now - timedelta(hours=3)}}).limit(50):
@@ -1239,14 +1234,12 @@ async def sweep_once() -> None:
             try:
                 data = await provider_state(pay["track_id"])
             except HTTPException:
-                continue  # provider outage: leave reservation, retry next sweep
+                continue  # provider outage: retry next sweep
             if await apply_provider_state(pay, data, "sweeper") in ("paid", "inconsistent"):
                 continue
-        fresh = await transition("orders", order["_id"], "expired", note="reservation expired")
-        if fresh:
-            if pay:
-                await transition("payment_records", pay["_id"], "expired", note="reservation expired")
-            await release_once(fresh)
+        fresh = await transition("orders", order["_id"], "expired", note="payment window closed")
+        if fresh and pay:
+            await transition("payment_records", pay["_id"], "expired", note="payment window closed")
 
 
 async def sweeper_loop() -> None:
@@ -1791,12 +1784,7 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
         await db()["orders"].insert_one(order)
     except DuplicateKeyError:
         raise HTTPException(409, "Duplicate checkout request")
-    try:
-        await reserve_lines(order["items"], order["_id"])
-    except HTTPException:
-        await transition("orders", order["_id"], "failed", note="stock unavailable")
-        raise
-    pay = None
+    pay = None  # no stock is reserved here: it is taken only once the payment is verified
     try:
         if body.payment_method == "wallet":
             await wallet_post(user["_id"], -order["total_minor"], "purchase", f"buy:{number}", ref=number)
@@ -1808,9 +1796,7 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
             pay = await create_invoice(user, number, order["total_minor"], "order", order["_id"], f"Order {number}")
             await transition("orders", order["_id"], "pending", note="awaiting payment")
     except HTTPException:
-        fresh = await transition("orders", order["_id"], "failed", note="payment initiation failed")
-        if fresh:
-            await release_once(fresh)
+        await transition("orders", order["_id"], "failed", note="payment initiation failed")
         raise
     if not body.buy_now:  # "Buy now" leaves whatever is already in the cart alone
         await db()["carts"].update_one({"user_id": user["_id"]}, {"$set": {"items": []}})
@@ -1857,7 +1843,6 @@ async def cancel_order(number: str, request: Request, user: dict = Depends(curre
         raise HTTPException(409, "Order can no longer be cancelled")
     if pay:
         await transition("payment_records", pay["_id"], "cancelled", note="order cancelled")
-    await release_once(fresh)
     return {"order": public_order(fresh)}
 
 
@@ -2205,7 +2190,7 @@ async def admin_inventory(q: str = "", page: int = Query(1, ge=1, le=500), user:
     rows = []
     async for p in db()["products"].find(flt).sort("name_lc", 1).skip((page - 1) * 25).limit(25):
         for v in p["variants"]:
-            rows.append({"product_id": str(p["_id"]), "name": p["name"], "sku": v["sku"], "label": v["label"], "stock": v["stock"], "reserved": v.get("reserved", 0),
+            rows.append({"product_id": str(p["_id"]), "name": p["name"], "sku": v["sku"], "label": v["label"], "stock": v["stock"],
                          "available": v.get("available", 0), "sold": v.get("sold", 0), "low_stock_threshold": p.get("low_stock_threshold", 0), "status": p["status"]})
     return {"rows": rows}
 
@@ -2246,11 +2231,11 @@ async def admin_inventory_export(request: Request, user: dict = Depends(admin_us
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["product_id", "name", "sku", "stock", "reserved", "available", "sold"])
+    w.writerow(["product_id", "name", "sku", "stock", "available", "sold"])
     async for p in db()["products"].find({"status": {"$ne": "archived"}}):
         for v in p["variants"]:
             name = p["name"]
-            w.writerow([str(p["_id"]), ("'" + name) if name[:1] in "=+-@" else name, v["sku"], v["stock"], v.get("reserved", 0), v.get("available", 0), v.get("sold", 0)])
+            w.writerow([str(p["_id"]), ("'" + name) if name[:1] in "=+-@" else name, v["sku"], v["stock"], v.get("available", 0), v.get("sold", 0)])
     await audit(request, "inventory.export", user["_id"], category="inventory")
     return Response(buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="inventory.csv"'})
 
