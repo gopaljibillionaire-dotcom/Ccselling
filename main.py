@@ -11,17 +11,19 @@ import asyncio
 import base64
 import getpass
 import hashlib
+import hmac
 import io
 import json
 import logging
 import re
 import secrets
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -119,7 +121,8 @@ async def ensure_indexes(d: Any) -> None:
     await ix("audit_logs", [("category", A), ("created_at", D)])
     await ix("notifications", [("user_id", A), ("created_at", D)])
     await ix("newsletter", [("email", A)], unique=True)
-    await ix("captchas", [("expires_at", A)], expireAfterSeconds=0)
+    await ix("captcha_used", [("nonce", A)], unique=True)
+    await ix("captcha_used", [("expires_at", A)], expireAfterSeconds=0)
 
 
 DEFAULT_TIERS = [
@@ -325,15 +328,15 @@ class RegisterIn(Strict):
     invite_code: Optional[str] = Field(default=None, max_length=100)
     referral_code: Optional[str] = Field(default=None, max_length=20)
     accept_terms: bool
-    captcha_id: str = Field(default="", max_length=80)
-    captcha_answer: str = Field(default="", max_length=10)
+    captcha_id: str = Field(default="", max_length=600)
+    captcha_answer: str = Field(default="", max_length=12)
 
 
 class LoginIn(Strict):
     email: str
     password: str = Field(max_length=128)
-    captcha_id: str = Field(default="", max_length=80)
-    captcha_answer: str = Field(default="", max_length=10)
+    captcha_id: str = Field(default="", max_length=600)
+    captcha_answer: str = Field(default="", max_length=12)
 
 
 class CodeIn(Strict):
@@ -365,6 +368,8 @@ class CartItemIn(Strict):
 
 class CheckoutIn(Strict):
     payment_method: Literal["plisio", "wallet"] = "plisio"
+    # "Buy now": purchase just this one item, leaving the saved cart untouched.
+    buy_now: Optional[CartItemIn] = None
 
 
 class DepositIn(Strict):
@@ -410,10 +415,11 @@ class VariantIn(Strict):
     stock: int = Field(default=0, ge=0, le=1_000_000)
 
 
-class DeliveryItem(Strict):
-    """One copy of what the buyer receives after payment (link, account, key...)."""
-    text: str = Field(min_length=1, max_length=5000)
-    vars: Dict[str, str] = Field(default_factory=dict, max_length=20)
+class DeliveryIn(Strict):
+    """One placeholder of the digital delivery: a heading plus the content the buyer receives after paying."""
+    label: str = Field(min_length=1, max_length=60)
+    value: str = Field(min_length=1, max_length=4000)
+    kind: Literal["text", "link", "secret"] = "text"
 
 
 class ProductIn(Strict):
@@ -435,8 +441,7 @@ class ProductIn(Strict):
     status: Literal["draft", "published"] = "draft"
     delivery_info: str = Field(default="", max_length=500)
     refund_policy: str = Field(default="", max_length=1000)
-    delivery_template: str = Field(default="", max_length=5000)
-    delivery_items: List[DeliveryItem] = Field(default_factory=list, max_length=500)
+    delivery: List[DeliveryIn] = Field(default_factory=list, max_length=20)
 
 
 class StatusIn(Strict):
@@ -722,6 +727,20 @@ async def public_product(p: dict, detail: bool = False, ctx: Optional[dict] = No
     return out
 
 
+def clean_delivery(items: List[DeliveryIn]) -> List[dict]:
+    """Sanitise admin-entered delivery placeholders. Links must be http(s); everything else is plain text."""
+    out = []
+    for d in items:
+        label = sec.clean_text(d.label, 60)
+        value = sec.clean_text(d.value, 4000, multiline=True)
+        if not label or not value:
+            continue
+        if d.kind == "link" and not re.match(r"^https?://[^\s]+$", value):
+            raise HTTPException(422, f"“{label}” is marked as a link, so it must start with http:// or https://")
+        out.append({"label": label, "value": value, "kind": d.kind})
+    return out
+
+
 async def build_product_doc(body: ProductIn, existing: Optional[dict] = None) -> dict:
     """Validate a ProductIn against live country/category/schema data and build the DB document."""
     ctx = await catalog_ctx()
@@ -772,13 +791,8 @@ async def build_product_doc(body: ProductIn, existing: Optional[dict] = None) ->
         "variants": variants, "low_stock_threshold": body.low_stock_threshold, "fields": fields,
         "tags": [sec.clean_text(t, 30) for t in body.tags], "featured": body.featured, "status": body.status,
         "delivery_info": sec.clean_text(body.delivery_info, 500), "refund_policy": sec.clean_text(body.refund_policy, 1000),
+        "delivery_fields": clean_delivery(body.delivery),
         "search_blob": " ".join(blob_parts), "updated_at": utcnow(),
-        "delivery": {
-            "template": sec.clean_text(body.delivery_template, 5000, multiline=True, label="Delivery template"),
-            "items": [{"text": sec.clean_text(i.text, 5000, multiline=True, label="Delivery content"),
-                       "vars": {sec.assert_safe_key(k): sec.clean_text(v, 300, multiline=True, label="Placeholder value") for k, v in i.vars.items()}}
-                      for i in body.delivery_items],
-        },
     }
     return doc
 
@@ -923,14 +937,6 @@ async def price_cart(user: dict, items: List[dict], strict: bool = False) -> dic
     """Server-side pricing from current DB data. Client-supplied prices are never read."""
     if not items:
         return {"lines": [], "subtotal_minor": 0, "member_discount_minor": 0, "tax_minor": 0, "total_minor": 0, "currency": settings.default_currency}
-    merged: Dict[Tuple[str, str], dict] = {}
-    for raw in items:
-        key = (str(raw["product_id"]), str(raw["sku"]))
-        if key in merged:
-            merged[key]["qty"] = min(20, merged[key]["qty"] + int(raw["qty"]))
-        else:
-            merged[key] = {"product_id": key[0], "sku": key[1], "qty": max(1, min(20, int(raw["qty"])))}
-    items = list(merged.values())
     ids = [oid(i["product_id"]) for i in items]
     prods = {p["_id"]: p async for p in db()["products"].find({"_id": {"$in": ids}})}
     lines, problems = [], []
@@ -964,11 +970,11 @@ def public_order(o: dict, pay: Optional[dict] = None) -> dict:
          "subtotal_minor": o["subtotal_minor"], "member_discount_minor": o["member_discount_minor"], "tax_minor": o["tax_minor"],
          "total_minor": o["total_minor"], "currency": o["currency"], "payment_method": o["payment_method"],
          "created_at": iso(o["created_at"]), "paid_at": iso(o.get("paid_at")), "points_earned": o.get("points_earned", 0),
-         "refund_total_minor": o.get("refund_total_minor", 0),
-         "deliveries": o.get("delivery_map", {}) if o["status"] in ("paid", "refunded") else {},
-         "history": [{"status": h["status"], "at": iso(h["at"])} for h in o.get("history", [])]}
+         "refund_total_minor": o.get("refund_total_minor", 0), "history": [{"status": h["status"], "at": iso(h["at"])} for h in o.get("history", [])]}
     if pay and o["status"] in ("created", "pending") and pay.get("payment_url"):
         d["payment_url"] = pay["payment_url"]
+    if o["status"] == "paid":  # digital goods: the buyer only ever sees delivery content after payment is verified
+        d["deliveries"] = o.get("deliveries", [])
     return d
 
 
@@ -1013,7 +1019,7 @@ async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
     return result
 
 
-async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str, success_path: str = "") -> dict:
+async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
     await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
 
     amount = float(Decimal(amount_minor) / 100)
@@ -1025,7 +1031,7 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
         "order_number": reference,
         "email": user["email"],
         "callback_url": f"{settings.public_app_url}/api/payments/plisio/webhook?json=true",
-        "success_invoice_url": f"{settings.public_app_url}{success_path or ('/?order=' + reference)}",
+        "success_invoice_url": f"{settings.public_app_url}/?order={reference}",
         "fail_invoice_url": f"{settings.public_app_url}/?order={reference}&status=failed",
         "expire_min": "60",
     })
@@ -1074,38 +1080,49 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
 async def provider_state(track_id: str) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", track_id):
         raise HTTPException(502, "Invalid provider reference")
-    # Plisio uses /operations/{id} to get transaction status
-    return await plisio_request(f"/operations/{track_id}")
+    # Plisio uses /operations/{id} to get transaction status. Depending on API version the fields are
+    # either at the top level of "data" or nested under "operation" - accept both.
+    data = await plisio_request(f"/operations/{track_id}")
+    if isinstance(data, dict) and isinstance(data.get("operation"), dict):
+        data = {**data, **data["operation"]}
+    return data
 
 
 def map_provider_status(raw: str) -> str:
     s = (raw or "").strip().lower()
     if s in ("completed", "confirmed"):
         return "paid"
-    if s in ("expired", "cancelled", "error", "failed"):
+    if s in ("expired", "cancelled", "canceled", "error", "failed"):
         return "failed"
-    return "pending"  # new / waiting / pending
+    return "pending"  # new / pending / pending internal / mismatch (waiting for the rest of the payment)
 
 
 def verify_amounts(pay: dict, data: dict) -> Optional[str]:
     """Return None when provider data is consistent with our record, else a reason string.
-    Plisio operation objects expose the fiat side as source_sum/source_currency and may omit
-    order_number on some responses, so those fields are checked only when present."""
-    raw_amount = data.get("source_sum")
-    if raw_amount in (None, "", 0, "0"):
-        raw_amount = data.get("actual_sum") or data.get("amount")
-    raw_currency = data.get("source_currency") or data.get("currency")
-    try:
-        paid = Decimal(str(raw_amount))
-    except (InvalidOperation, TypeError):
-        return "amount missing or malformed"
-    if paid != Decimal(pay["expected_minor"]) / 100:
-        return f"amount mismatch (expected {minor_to_str(pay['expected_minor'])}, provider {paid})"
-    if str(raw_currency or "").upper() != pay["currency"].upper():
-        return "currency mismatch"
-    order_number = data.get("order_number")
-    if order_number not in (None, "") and str(order_number) != pay["reference"]:
+
+    Plisio reports TWO amounts: `amount` / `currency` are the CRYPTO side (e.g. 0.00031 BTC) while
+    `source_amount` / `source_currency` are the FIAT value we asked for (e.g. 20.00 USD). The fiat side
+    is the one that must be compared with what we expected - comparing the crypto amount with the
+    dollar amount was what kept paid deposits from ever being credited.
+    """
+    ref = str(data.get("order_number") or "")
+    if ref and ref != pay["reference"]:
         return "order reference mismatch"
+    src_cur = str(data.get("source_currency") or "").upper()
+    if src_cur and src_cur != pay["currency"].upper():
+        return "currency mismatch"
+    raw_amt = data.get("source_amount")
+    if raw_amt in (None, ""):
+        # Provider status is read directly from Plisio with our API key; "completed" already means the
+        # invoice was paid in full, so a missing fiat figure is not grounds to reject the payment.
+        return None
+    try:
+        paid = Decimal(str(raw_amt))
+    except (InvalidOperation, TypeError):
+        return "amount malformed"
+    expected = Decimal(pay["expected_minor"]) / 100
+    if paid + Decimal("0.01") < expected:  # overpaying is fine; underpaying beyond 1 cent is not
+        return f"amount mismatch (expected {minor_to_str(pay['expected_minor'])}, provider {paid})"
     return None
 
 
@@ -1139,6 +1156,21 @@ async def apply_provider_state(pay: dict, data: dict, source: str) -> str:
     return new
 
 
+async def refresh_payment(pay: dict, source: str = "poll", min_gap: float = 4.0) -> str:
+    """Ask Plisio for the live state of a pending payment and apply it immediately (credits wallet / settles order)."""
+    if pay.get("provider") != "plisio" or pay.get("status") != "pending" or not pay.get("track_id") or not settings.plisio_enabled:
+        return pay.get("status", "")
+    now = time.time()
+    if now - float(pay.get("last_polled_ts") or 0) < min_gap:
+        return "pending"
+    await db()["payment_records"].update_one({"_id": pay["_id"]}, {"$set": {"last_polled_ts": now}})
+    try:
+        data = await provider_state(pay["track_id"])
+    except HTTPException:
+        return "pending"
+    return await apply_provider_state(pay, data, source)
+
+
 async def release_once(order: dict) -> None:
     claimed = await db()["orders"].find_one_and_update({"_id": order["_id"], "reservation_released": {"$ne": True}, "inventory_committed": {"$ne": True}},
                                                        {"$set": {"reservation_released": True}})
@@ -1161,22 +1193,25 @@ async def claim_flag(order_id: ObjectId, flag: str) -> Optional[dict]:
     return await db()["orders"].find_one_and_update({"_id": order_id, flag: {"$ne": True}}, {"$set": {flag: True}}, return_document=ReturnDocument.AFTER)
 
 
-def render_delivery_text(text: str, vars: Dict[str, str], order: dict, user: Optional[dict], sku: str) -> str:
-    """Fill {placeholders} in a delivery copy. Built-ins: {order} {email} {name} {sku};
-    custom key=value pairs (e.g. name=Gopal) override or extend them."""
-    values = {"order": order["number"], "email": (user or {}).get("email", ""), "name": (user or {}).get("name", ""), "sku": sku}
-    values.update({k: str(v) for k, v in (vars or {}).items()})
-
-    def repl(m: "re.Match[str]") -> str:
-        return values.get(m.group(1), m.group(0))
-
-    return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", repl, text)
+async def issue_delivery(order: dict) -> None:
+    """Snapshot each product's delivery placeholders onto the order so the buyer can see them (and they never change later)."""
+    ids = [it["product_id"] for it in order["items"]]
+    prods = {p["_id"]: p async for p in db()["products"].find({"_id": {"$in": ids}}, {"delivery_fields": 1, "name": 1})}
+    deliveries = []
+    for it in order["items"]:
+        fields = (prods.get(it["product_id"]) or {}).get("delivery_fields") or []
+        if fields:
+            deliveries.append({"product_id": str(it["product_id"]), "name": it["name"], "variant_label": it.get("variant_label", ""), "qty": it["qty"],
+                               "fields": [{"label": f["label"], "value": f["value"], "kind": f.get("kind", "text")} for f in fields]})
+    await db()["orders"].update_one({"_id": order["_id"]}, {"$set": {"deliveries": deliveries, "fulfillment_status": "delivered", "delivered_at": utcnow()}})
 
 
 async def complete_paid_steps(order: dict) -> None:
     """Every step is claim-guarded, so webhook retries / reconciliation can re-run this safely."""
     if await claim_flag(order["_id"], "inventory_committed"):
         await commit_sale(order)
+    if await claim_flag(order["_id"], "delivery_issued"):
+        await issue_delivery(order)
     if await claim_flag(order["_id"], "rewards_issued"):
         user = await db()["users"].find_one({"_id": order["user_id"]})
         if user:
@@ -1189,34 +1224,15 @@ async def complete_paid_steps(order: dict) -> None:
                     await db()["users"].update_one({"_id": ref["referrer_id"]}, {"$inc": {"points_balance": settings.referral_reward_points}})
                 except DuplicateKeyError:
                     pass
-            await notify(order["user_id"], f"Order {order['number']} confirmed", "Your payment was verified. Thank you!")
-    if await claim_flag(order["_id"], "delivery_assigned"):
-        user = await db()["users"].find_one({"_id": order["user_id"]})
-        for it in order["items"]:
-            p = await db()["products"].find_one({"_id": it["product_id"]}, {"delivery": 1})
-            delivery = (p or {}).get("delivery") or {}
-            assigned: List[str] = []
-            for _ in range(it["qty"]):  # hand out one copy per unit sold, in order
-                if not delivery.get("items"):
-                    break
-                item = delivery["items"][0]
-                await db()["products"].update_one({"_id": p["_id"]}, {"$pop": {"delivery.items": -1}})
-                delivery["items"] = delivery["items"][1:]
-                assigned.append(render_delivery_text(item.get("text", ""), item.get("vars") or {}, order, user, it["sku"]))
-            if not assigned and delivery.get("template"):
-                assigned.append(render_delivery_text(delivery["template"], {}, order, user, it["sku"]))
-            if assigned:
-                await db()["orders"].update_one({"_id": order["_id"]}, {"$set": {f"delivery_map.{it['sku']}": assigned}})
+            await notify(order["user_id"], f"Order {order['number']} confirmed", "Your payment was verified. Your delivery details are ready in the order page.")
 
 
 async def sweep_once() -> None:
     """Reconciliation + reservation expiry. Safe to run concurrently on many dynos."""
     now = utcnow()
-    async for pay in db()["payment_records"].find({"status": "pending", "purpose": "wallet_deposit", "provider": "plisio"}).limit(20):
-        try:
-            await apply_provider_state(pay, await provider_state(pay["track_id"]), "sweeper")
-        except HTTPException:
-            continue  # provider outage: retry next sweep
+    if settings.plisio_enabled:
+        async for pay in db()["payment_records"].find({"status": "pending", "provider": "plisio", "created_at": {"$gt": now - timedelta(hours=3)}}).limit(50):
+            await refresh_payment(pay, "sweeper", min_gap=20)
     async for order in db()["orders"].find({"status": {"$in": ["created", "pending"]}, "reservation_expires_at": {"$lt": now}}).limit(50):
         pay = await db()["payment_records"].find_one({"order_id": order["_id"]})
         if pay and pay.get("track_id") and settings.plisio_enabled:
@@ -1246,6 +1262,67 @@ async def sweeper_loop() -> None:
 # 9. PUBLIC + CUSTOMER ROUTES
 # =============================================================================
 api = APIRouter(prefix="/api", dependencies=[Depends(api_rate_limit)])
+
+
+# ---- text captcha (stateless signed token + single-use nonce) ------------------------------
+CAPTCHA_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O/1/I/L - nothing ambiguous to read
+CAPTCHA_LEN, CAPTCHA_TTL = 5, 300
+
+
+def _cap_mac(msg: str) -> str:
+    key = (settings.app_secret or "dev-only-captcha-secret").encode()
+    return hmac.new(key, msg.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def captcha_svg(text: str) -> str:
+    rnd = secrets.SystemRandom()
+    w, h = 210, 70
+    cols = ["#e8eefc", "#67e8f9", "#93c5fd", "#c4b5fd", "#a5f3fc"]
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
+             '<defs><linearGradient id="b" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1430"/><stop offset="1" stop-color="#16285a"/></linearGradient></defs>',
+             f'<rect width="{w}" height="{h}" rx="12" fill="url(#b)"/>']
+    for _ in range(5):  # background squiggles
+        y1, y2, y3 = (rnd.randint(8, h - 8) for _ in range(3))
+        parts.append(f'<path d="M0 {y1} C {w // 3} {y2}, {2 * w // 3} {y3}, {w} {rnd.randint(8, h - 8)}" stroke="{rnd.choice(cols)}" stroke-opacity=".28" stroke-width="1.4" fill="none"/>')
+    for _ in range(36):  # speckle
+        parts.append(f'<circle cx="{rnd.randint(2, w - 2)}" cy="{rnd.randint(2, h - 2)}" r="{rnd.choice((0.8, 1.1, 1.6))}" fill="{rnd.choice(cols)}" fill-opacity=".35"/>')
+    step = (w - 36) / len(text)
+    for i, ch in enumerate(text):
+        x = 20 + i * step + rnd.randint(-3, 3)
+        y = h / 2 + 12 + rnd.randint(-6, 6)
+        parts.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{rnd.randint(30, 38)}" font-weight="700" font-family="Verdana, DejaVu Sans, Arial, sans-serif" '
+                     f'fill="{rnd.choice(cols)}" transform="rotate({rnd.randint(-24, 24)} {x:.1f} {y:.1f})">{ch}</text>')
+    parts.append(f'<path d="M6 {rnd.randint(22, 48)} Q {w // 2} {rnd.randint(8, 62)}, {w - 6} {rnd.randint(22, 48)}" stroke="#e8eefc" stroke-opacity=".55" stroke-width="1.6" fill="none"/>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def captcha_make() -> dict:
+    rnd = secrets.SystemRandom()
+    text = "".join(rnd.choice(CAPTCHA_CHARS) for _ in range(CAPTCHA_LEN))
+    nonce, exp = secrets.token_hex(8), int(time.time()) + CAPTCHA_TTL
+    body = f"{nonce}.{exp}.{_cap_mac(f'a|{nonce}|{text}')}"
+    token = f"{body}.{_cap_mac('t|' + body)}"
+    svg = captcha_svg(text)
+    return {"id": token, "image": "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode(), "expires_in": CAPTCHA_TTL}
+
+
+async def captcha_check(token: str, answer: str) -> None:
+    """Raises 422 unless `answer` matches the challenge. Every challenge works once, right or wrong."""
+    bad = HTTPException(422, "The security code is wrong or expired. Please try the new one.")
+    parts = (token or "").split(".")
+    if len(parts) != 4 or not answer:
+        raise bad
+    nonce, exp, ans, sig = parts
+    if not hmac.compare_digest(sig, _cap_mac(f"t|{nonce}.{exp}.{ans}")) or not exp.isdigit() or int(exp) < time.time():
+        raise bad
+    try:
+        await db()["captcha_used"].insert_one({"nonce": nonce, "expires_at": utcnow() + timedelta(minutes=15)})
+    except DuplicateKeyError:
+        raise bad
+    guess = re.sub(r"[^A-Za-z0-9]", "", answer).upper()
+    if not hmac.compare_digest(ans, _cap_mac(f"a|{nonce}|{guess}")):
+        raise bad
 
 
 def set_session_cookie(response: Response, token: str) -> None:
@@ -1287,58 +1364,16 @@ async def public_config() -> dict:
 
 
 # ---- auth -------------------------------------------------------------------
-CAPTCHA_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # unambiguous symbols only
-_CAPTCHA_COLORS = ("#22d3ee", "#3b82f6", "#34d399", "#fbbf24", "#f87171", "#e8eefc")
-
-
-def captcha_svg(code: str) -> str:
-    """Text-symbol captcha drawn as inline SVG. No image hosting, no sticker art."""
-    w, h = 220, 70
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-label="Security check">',
-        '<rect width="100%" height="100%" rx="12" fill="#0b1430"/>',
-    ]
-    for _ in range(6):
-        x1, y1, x2, y2 = secrets.randbelow(w), secrets.randbelow(h), secrets.randbelow(w), secrets.randbelow(h)
-        parts.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{secrets.choice(_CAPTCHA_COLORS)}" stroke-opacity="0.35" stroke-width="1.6"/>')
-    for i, ch in enumerate(code):
-        x = 24 + i * 36 + secrets.randbelow(10) - 5
-        y = 48 + secrets.randbelow(12) - 6
-        rot = secrets.randbelow(50) - 25
-        parts.append(
-            f'<text x="{x}" y="{y}" font-family="Verdana, DejaVu Sans, sans-serif" font-size="34" font-weight="700" '
-            f'fill="{secrets.choice(_CAPTCHA_COLORS[:5])}" transform="rotate({rot} {x} {y})">{ch}</text>'
-        )
-    for _ in range(24):
-        parts.append(f'<circle cx="{secrets.randbelow(w)}" cy="{secrets.randbelow(h)}" r="1.2" fill="{secrets.choice(_CAPTCHA_COLORS)}" fill-opacity="0.5"/>')
-    parts.append("</svg>")
-    return "".join(parts)
-
-
-async def verify_captcha(captcha_id: str, answer: str, request: Request) -> None:
-    """Single-use, 5-minute captcha. Fails closed; consumed on attempt."""
-    cid = (captcha_id or "")[:80]
-    ans = (answer or "").strip().lower()
-    if not cid or not ans:
-        raise HTTPException(422, "Please complete the security check (captcha).")
-    doc = await db()["captchas"].find_one_and_delete({"_id": cid})
-    if not doc or doc["expires_at"] < utcnow() or str(doc["code"]).lower() != ans:
-        await audit(request, "auth.captcha_failed", category="security", level="warn")
-        raise HTTPException(400, "Security code is incorrect or has expired. Please try again.")
-
-
 @api.get("/auth/captcha")
-async def auth_captcha(request: Request) -> dict:
-    """Fresh text-symbol captcha for the login / registration forms."""
-    await S.limiter.enforce("captcha", sec.client_ip(request), 60, 900)
-    code = "".join(secrets.choice(CAPTCHA_ALPHABET) for _ in range(5))
-    cid = new_token(16)
-    await db()["captchas"].insert_one({"_id": cid, "code": code, "expires_at": utcnow() + timedelta(minutes=5)})
-    return {"captcha_id": cid, "svg": captcha_svg(code)}
+async def get_captcha(response: Response) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    return captcha_make()
+
+
 @api.post("/auth/register", status_code=201)
 async def register(body: RegisterIn, request: Request, response: Response) -> dict:
     await sensitive(request, "register")
-    await verify_captcha(body.captcha_id, body.captcha_answer, request)
+    await captcha_check(body.captcha_id, body.captcha_answer)
     if not body.accept_terms:
         raise HTTPException(422, "You must accept the terms to register")
     email = sec.clean_email(body.email)
@@ -1372,7 +1407,7 @@ async def register(body: RegisterIn, request: Request, response: Response) -> di
 
 @api.post("/auth/login")
 async def login(body: LoginIn, request: Request, response: Response) -> dict:
-    await verify_captcha(body.captcha_id, body.captcha_answer, request)
+    await captcha_check(body.captcha_id, body.captcha_answer)
     ip, email = sec.client_ip(request), sec.clean_email(body.email) if sec.EMAIL_RE.match(body.email or "") else "invalid"
     ident = f"{email}|{ip}"
     await S.limiter.guard_failures("login", ident, settings.rl_login_max, settings.rl_login_window)
@@ -1729,7 +1764,12 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
     if existing:
         pay = await db()["payment_records"].find_one({"order_id": existing["_id"]})
         return {"order": public_order(existing, pay)}
-    cart = await db()["carts"].find_one({"user_id": user["_id"]}) or {"items": []}
+    if body.buy_now:
+        if body.buy_now.qty < 1:
+            raise HTTPException(422, "Quantity must be at least 1")
+        cart = {"items": [{"product_id": str(oid(body.buy_now.product_id)), "sku": body.buy_now.sku, "qty": body.buy_now.qty}]}
+    else:
+        cart = await db()["carts"].find_one({"user_id": user["_id"]}) or {"items": []}
     if not cart["items"]:
         raise HTTPException(422, "Your cart is empty")
     if body.payment_method == "plisio" and not settings.plisio_enabled:
@@ -1772,7 +1812,8 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
         if fresh:
             await release_once(fresh)
         raise
-    await db()["carts"].update_one({"user_id": user["_id"]}, {"$set": {"items": []}})
+    if not body.buy_now:  # "Buy now" leaves whatever is already in the cart alone
+        await db()["carts"].update_one({"user_id": user["_id"]}, {"$set": {"items": []}})
     await audit(request, "order.created", user["_id"], target=number, category="order")
     return {"order": public_order(await db()["orders"].find_one({"_id": order["_id"]}), pay)}
 
@@ -1788,7 +1829,11 @@ async def my_order(number: str, user: dict = Depends(current_user)) -> dict:
     o = await db()["orders"].find_one({"number": sec.clean_text(number, 20).upper(), "user_id": user["_id"]})
     if not o:
         raise HTTPException(404, "Order not found")
-    return {"order": public_order(o, await db()["payment_records"].find_one({"order_id": o["_id"]}))}
+    pay = await db()["payment_records"].find_one({"order_id": o["_id"]})
+    if pay and o["status"] in ("created", "pending") and await refresh_payment(pay, "order-view") in ("paid", "failed", "expired"):
+        o = await db()["orders"].find_one({"_id": o["_id"]}) or o
+        pay = await db()["payment_records"].find_one({"_id": pay["_id"]})
+    return {"order": public_order(o, pay)}
 
 
 @api.post("/orders/{number}/cancel")
@@ -1814,24 +1859,6 @@ async def cancel_order(number: str, request: Request, user: dict = Depends(curre
         await transition("payment_records", pay["_id"], "cancelled", note="order cancelled")
     await release_once(fresh)
     return {"order": public_order(fresh)}
-
-
-@api.post("/orders/{number}/check")
-async def order_payment_check(number: str, request: Request, user: dict = Depends(current_user)) -> dict:
-    """Buyer-triggered instant verification: asks Plisio for the live state and applies it immediately."""
-    await S.limiter.enforce("paycheck", str(user["_id"]), 60, 900)
-    o = await db()["orders"].find_one({"number": sec.clean_text(number, 20).upper(), "user_id": user["_id"]})
-    if not o:
-        raise HTTPException(404, "Order not found")
-    pay = await db()["payment_records"].find_one({"order_id": o["_id"]})
-    if o["status"] in ("created", "pending") and pay and pay.get("provider") == "plisio" and pay.get("track_id") and settings.plisio_enabled:
-        try:
-            await apply_provider_state(pay, await provider_state(pay["track_id"]), "buyer-check")
-        except HTTPException:
-            pass  # provider hiccup: stay pending, the sweeper keeps retrying
-        o = await db()["orders"].find_one({"_id": o["_id"]})
-        pay = await db()["payment_records"].find_one({"order_id": o["_id"]})
-    return {"order": public_order(o, pay)}
 
 
 # ---- payments -----------------------------------------------------------------
@@ -1876,12 +1903,28 @@ async def plisio_webhook(request: Request) -> Response:
     return PlainTextResponse("ok")
 
 
+@api.post("/payments/{reference}/verify")
+async def verify_payment(reference: str, user: dict = Depends(current_user)) -> dict:
+    """Called when the customer returns from the payment page: asks Plisio directly and credits / settles at once."""
+    ref = sec.clean_text(reference, 20).upper()
+    pay = await db()["payment_records"].find_one({"reference": ref, "user_id": user["_id"]})
+    if not pay:
+        raise HTTPException(404, "Payment not found")
+    await refresh_payment(pay, "return-verify", min_gap=0)
+    pay = await db()["payment_records"].find_one({"_id": pay["_id"]})
+    return {"status": pay["status"], "purpose": pay.get("purpose"), "reference": pay["reference"]}
+
+
 # ---- wallet / membership / rewards / referrals ----------------------------------
 @api.get("/wallet")
 async def wallet(user: dict = Depends(current_user)) -> dict:
+    pending = 0
+    async for pay in db()["payment_records"].find({"user_id": user["_id"], "purpose": "wallet_deposit", "status": "pending"}).sort("created_at", -1).limit(3):
+        if await refresh_payment(pay, "wallet-view") == "pending":
+            pending += 1
     acct = await db()["wallet_accounts"].find_one({"user_id": user["_id"]}) or {"balance_minor": 0}
     cur = db()["wallet_ledger"].find({"user_id": user["_id"]}).sort("created_at", -1).limit(50)
-    return {"balance_minor": acct["balance_minor"], "currency": settings.default_currency,
+    return {"balance_minor": acct["balance_minor"], "currency": settings.default_currency, "pending_deposits": pending,
             "ledger": [{"type": e["type"], "amount_minor": e["amount_minor"], "status": e["status"], "ref": e.get("ref"), "created_at": iso(e["created_at"])} async for e in cur]}
 
 
@@ -1890,22 +1933,9 @@ async def wallet_deposit(body: DepositIn, request: Request, user: dict = Depends
     minor = money_to_minor(body.amount, "Amount", allow_zero=False)
     if minor < settings.wallet_deposit_min_minor or minor > settings.wallet_deposit_max_minor:
         raise HTTPException(422, f"Deposits must be between {minor_to_str(settings.wallet_deposit_min_minor)} and {minor_to_str(settings.wallet_deposit_max_minor)}")
-    pay = await create_invoice(user, "DEP-" + secrets.token_hex(5).upper(), minor, "wallet_deposit", None, "Wallet top-up", "/#/account/wallet")
+    pay = await create_invoice(user, "DEP-" + secrets.token_hex(5).upper(), minor, "wallet_deposit", None, "Wallet top-up")
     await audit(request, "wallet.deposit_started", user["_id"], target=pay["reference"], category="payment")
     return {"payment_url": pay["payment_url"], "reference": pay["reference"]}
-
-
-@api.post("/wallet/check")
-async def wallet_check(request: Request, user: dict = Depends(current_user)) -> dict:
-    """Instantly verify pending wallet top-ups with Plisio and return the fresh balance."""
-    await S.limiter.enforce("paycheck", str(user["_id"]), 60, 900)
-    if settings.plisio_enabled:
-        async for pay in db()["payment_records"].find({"user_id": user["_id"], "purpose": "wallet_deposit", "status": "pending", "provider": "plisio"}).sort("created_at", -1).limit(5):
-            try:
-                await apply_provider_state(pay, await provider_state(pay["track_id"]), "wallet-check")
-            except HTTPException:
-                continue  # provider outage: try again later
-    return await wallet(user)
 
 
 @api.get("/membership")
@@ -1985,14 +2015,12 @@ async def admin_stats(user: dict = Depends(staff)) -> dict:
     out_q = {"status": "published", "$expr": {"$lte": [{"$sum": "$variants.available"}, 0]}}
     rev = await (await db()["orders"].aggregate([{"$match": {"status": {"$in": ["paid", "refunded"]}}}, {"$group": {"_id": None, "rev": {"$sum": "$total_minor"}, "ref": {"$sum": "$refund_total_minor"}}}])).to_list(1)
     since = utcnow() - timedelta(days=30)
-    sec_events = [{"action": e["action"], "level": e.get("level"), "ip": e.get("ip"), "at": iso(e["created_at"])} async for e in db()["audit_logs"].find({"category": "security"}).sort("created_at", -1).limit(8)]
-    inv = [{"sku": m["sku"], "type": m["type"], "delta": m["delta_stock"] or m["delta_available"], "at": iso(m["created_at"])} async for m in db()["inventory_movements"].find({}).sort("created_at", -1).limit(8)]
     return {"currency": settings.default_currency, "customers_total": await c("users", {"role": "customer"}),
             "customers_active": await c("sessions", {"kind": "full", "last_seen": {"$gt": since}}), "products_published": await c("products", {"status": "published"}),
             "low_stock": await c("products", low_q), "out_of_stock": await c("products", out_q), "orders_total": await c("orders", {}),
             "orders_pending": await c("orders", {"status": {"$in": ["created", "pending"]}}), "orders_completed": await c("orders", {"status": "paid"}),
             "payments_pending": await c("payment_records", {"status": "pending"}), "revenue_minor": (rev[0]["rev"] - rev[0]["ref"]) if rev else 0,
-            "refunds_minor": rev[0]["ref"] if rev else 0, "recent_security_events": sec_events, "recent_inventory": inv}
+            "refunds_minor": rev[0]["ref"] if rev else 0}
 
 
 # ---- products --------------------------------------------------------------------
@@ -2711,14 +2739,17 @@ def test_state_machine() -> None:
 
 def test_amount_verification() -> None:
     pay = {"expected_minor": 5000, "currency": "USD", "reference": "ORD-1"}
-    assert verify_amounts(pay, {"amount": 50, "currency": "usd", "order_number": "ORD-1"}) is None
-    assert verify_amounts(pay, {"amount": 49.99, "currency": "USD", "order_number": "ORD-1"})
-    assert verify_amounts(pay, {"amount": 50, "currency": "EUR", "order_number": "ORD-1"})
-    assert verify_amounts(pay, {"amount": 50, "currency": "USD", "order_number": "ORD-2"})
+    # Plisio: amount/currency are CRYPTO (0.0003 BTC); source_amount/source_currency are the fiat value
+    ok = {"amount": "0.00031", "currency": "BTC", "source_amount": "50.00", "source_currency": "usd", "order_number": "ORD-1"}
+    assert verify_amounts(pay, ok) is None
+    assert verify_amounts(pay, {**ok, "source_amount": "49.50"})
+    assert verify_amounts(pay, {**ok, "source_currency": "EUR"})
+    assert verify_amounts(pay, {**ok, "order_number": "ORD-2"})
+    assert verify_amounts(pay, {"amount": "0.00031", "currency": "BTC", "order_number": "ORD-1"}) is None
 
 
 def test_provider_status_mapping() -> None:
-    assert map_provider_status("completed") == "paid" and map_provider_status("pending") == "pending" and map_provider_status("expired") == "expired"
+    assert map_provider_status("completed") == "paid" and map_provider_status("pending") == "pending" and map_provider_status("expired") == "failed" and map_provider_status("mismatch") == "pending"
 
 
 def test_dynamic_field_validation() -> None:
