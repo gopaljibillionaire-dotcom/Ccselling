@@ -74,7 +74,6 @@ const availChip = (a) => h("span", { class: "chip " + (a === "in_stock" ? "ok" :
 function productCard(p) {
   const href = "#/p/" + encodeURIComponent(p.slug);
   const fav = h("button", { class: "fav", type: "button", "aria-pressed": String(state.wishlist.has(p.id)), "aria-label": "Toggle wishlist", onclick: guard(async (ev) => { ev.preventDefault(); await toggleWish(p.id, fav); }) }, "♥");
-  const cmp = store.get("compare", []).includes(p.id);
   const cardFields = (p.fields || []).filter((f) => f.card).slice(0, 2);
   return h("article", { class: "card" },
     h("a", { class: "img", href, "aria-label": p.name }, safeImg(p.images[0] && p.images[0].url, p.images[0] && p.images[0].alt || p.name),
@@ -88,8 +87,8 @@ function productCard(p) {
       h("div", { class: "row wrap" }, availChip(p.availability)),
       h("div", { class: "actions" },
         h("button", { class: "btn primary sm", type: "button", disabled: !p.in_stock || p.variants.length !== 1, title: p.variants.length > 1 ? "Choose options on the product page" : "", onclick: guard(() => addToCart(p.id, p.variants[0].sku, 1)) }, p.variants.length > 1 ? "Options" : "Add"),
-        h("a", { class: "btn sm", href }, "Details"),
-        h("button", { class: "btn sm", type: "button", "aria-pressed": String(cmp), title: "Compare", onclick: (ev) => toggleCompare(p.id, ev.currentTarget) }, "⇄"))));
+        h("button", { class: "btn sm", type: "button", disabled: !p.in_stock || p.variants.length !== 1, onclick: guard(() => buyNow(p.id, p.variants[0].sku, 1)) }, "Buy"),
+        h("a", { class: "btn sm", href }, "Details"))));
 }
 const skeletons = (n = 8) => h("div", { class: "grid products" }, Array.from({ length: n }, () => h("div", { class: "skeleton" })));
 const empty = (msg, cta) => h("div", { class: "empty" }, h("p", null, msg), cta || null);
@@ -121,24 +120,30 @@ function authDialog(mode = "login") {
   const invite = h("input", { id: "a_inv", type: "text", maxlength: 100, autocomplete: "off" });
   const ref = h("input", { id: "a_ref", type: "text", maxlength: 20, value: store.get("ref", "") });
   const terms = h("input", { id: "a_terms", type: "checkbox" });
+  const capImg = h("img", { alt: "Security check", style: "width:100%;border-radius:10px;border:1px solid var(--line);background:#0b1430" });
+  const capAns = h("input", { id: "a_cap", maxlength: 5, autocomplete: "off", placeholder: "Enter the code", required: true, "aria-label": "Security code" });
+  let captchaId = "";
+  const loadCaptcha = guard(async () => { const r = await api("/auth/captcha"); captchaId = r.captcha_id; capImg.src = "data:image/svg+xml;utf8," + encodeURIComponent(r.svg); capAns.value = ""; });
+  loadCaptcha();
   const f = (label, input, hint) => h("div", { class: "field" }, h("label", { for: input.id }, label), input, hint ? h("div", { class: "hint" }, hint) : null);
   const form = h("form", { novalidate: true }, f("Email", email), mode === "register" ? f("Full name", name) : null, f("Password", pw, mode === "register" ? "At least 10 characters with three of: lowercase, uppercase, digit, symbol." : null),
     mode === "register" && state.cfg.invite_only ? f("Invitation code", invite, "Registration is invitation-only. No code? Apply from the support page.") : null,
     mode === "register" ? f("Referral code (optional)", ref) : null,
-    mode === "register" ? h("label", { class: "check" }, terms, "I accept the terms of service and privacy policy") : null, err,
+    mode === "register" ? h("label", { class: "check" }, terms, "I accept the terms of service and privacy policy") : null,
+    h("div", { class: "field" }, h("label", { for: "a_cap" }, "Security check"), capImg, h("div", { class: "row", style: "margin-top:6px" }, h("div", { class: "grow" }, capAns), h("button", { class: "btn sm", type: "button", onclick: loadCaptcha, "aria-label": "New code" }, "↻"))), err,
     h("button", { class: "btn primary", type: "submit", style: "width:100%" }, mode === "login" ? "Sign in" : "Create account"),
     h("p", { class: "small muted" }, mode === "login" ? "New here? " : "Have an account? ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); authDialog(mode === "login" ? "register" : "login"); } }, mode === "login" ? "Create an account" : "Sign in")));
   form.addEventListener("submit", async (e) => {
     e.preventDefault(); err.textContent = "";
     if (!email.value || !pw.value) { err.textContent = "Email and password are required."; return; }
     try {
-      const body = mode === "login" ? { email: email.value, password: pw.value } : { email: email.value, password: pw.value, name: name.value || "Customer", accept_terms: terms.checked, invite_code: invite.value || null, referral_code: ref.value || null };
+      const body = mode === "login" ? { email: email.value, password: pw.value, captcha_id: captchaId, captcha_answer: capAns.value } : { email: email.value, password: pw.value, name: name.value || "Customer", accept_terms: terms.checked, invite_code: invite.value || null, referral_code: ref.value || null, captcha_id: captchaId, captcha_answer: capAns.value };
       if (mode === "register" && !terms.checked) { err.textContent = "Please accept the terms to continue."; return; }
       const r = await api(mode === "login" ? "/auth/login" : "/auth/register", { method: "POST", body });
       if (r.mfa_required) { err.textContent = "Administrator accounts sign in on the /admin console."; return; }
       state.user = r.user; state.csrf = r.csrf; state.wishlist = new Set(r.user.wishlist || []);
       closeDialog(); renderAuthState(); await mergeGuestCart(); toast(mode === "login" ? "Welcome back!" : "Account created. Welcome!", "ok"); route();
-    } catch (ex) { err.textContent = ex.message; }
+    } catch (ex) { err.textContent = ex.message; loadCaptcha(); }
   });
   openDialog(mode === "login" ? "Sign in" : "Create account", form);
   setTimeout(() => email.focus(), 30);
@@ -163,21 +168,16 @@ async function addToCart(pid, sku, qty) {
   state.cart = await api("/cart/items", { method: "PUT", body: { product_id: pid, sku, qty: Math.min(20, (cur ? cur.qty : 0) + qty) } });
   updateCartBadge(); toast("Added to cart.", "ok");
 }
+async function buyNow(pid, sku, qty) { await addToCart(pid, sku, qty); location.hash = "#/cart"; }
 async function setQty(pid, sku, qty) { state.cart = await api("/cart/items", { method: "PUT", body: { product_id: pid, sku, qty } }); updateCartBadge(); }
 
-/* ---------- Wishlist / compare / recently viewed ---------- */
+/* ---------- Wishlist / recently viewed ---------- */
 async function toggleWish(pid, btn) {
   if (!requireLogin("Sign in to save items to your wishlist.")) return;
   const on = state.wishlist.has(pid);
   await api(`/wishlist/${pid}`, { method: on ? "DELETE" : "PUT" });
   on ? state.wishlist.delete(pid) : state.wishlist.add(pid);
   if (btn) btn.setAttribute("aria-pressed", String(!on));
-}
-function toggleCompare(pid, btn) {
-  let c = store.get("compare", []);
-  if (c.includes(pid)) c = c.filter((x) => x !== pid); else { if (c.length >= 3) return toast("Compare up to 3 products."); c.push(pid); }
-  store.set("compare", c); btn.setAttribute("aria-pressed", String(c.includes(pid)));
-  toast(c.length ? `Comparing ${c.length} product(s). Open Compare from the Shop page.` : "Comparison cleared.");
 }
 const rememberViewed = (id) => { const v = [id, ...store.get("viewed", []).filter((x) => x !== id)].slice(0, 12); store.set("viewed", v); };
 
@@ -195,7 +195,7 @@ async function route() {
   const root = clear(app()); root.append(skeletons(4));
   try {
     const view = !parts.length ? await homeView() : parts[0] === "shop" ? await shopView(q) : parts[0] === "p" ? await productView(parts[1]) : parts[0] === "cart" ? await cartView() :
-      parts[0] === "account" ? await accountView(parts[1] || "overview") : parts[0] === "orders" ? await orderView(parts[1]) : parts[0] === "compare" ? await compareView() : parts[0] === "support" ? await supportView() : empty("Page not found.", h("a", { class: "btn", href: "#/" }, "Go home"));
+      parts[0] === "account" ? await accountView(parts[1] || "overview") : parts[0] === "orders" ? await orderView(parts[1]) : parts[0] === "support" ? await supportView() : empty("Page not found.", h("a", { class: "btn", href: "#/" }, "Go home"));
     if (id !== state.loadId) return; clear(root).append(view);
   } catch (e) { if (id === state.loadId) clear(root).append(errorBox(e, route)); }
   bar(false); root.focus({ preventScroll: true });
@@ -247,7 +247,6 @@ async function shopView(q) {
     h("div", { class: "row" }, h("button", { class: "btn primary sm grow", type: "button", onclick: () => push({ min_price: min.value, max_price: max.value }) }, "Apply"), h("button", { class: "btn sm grow", type: "button", onclick: () => { location.hash = "#/shop"; } }, "Clear all")));
   try { const sc = await api("/schemas/public" + (f.category ? `?category_id=${f.category}` : "")); for (const fl of sc.filters) { const cur = dyn["f_" + fl.key] || ""; const inp = fl.options.length ? sel("fd_" + fl.key, [["", "Any"], ...fl.options.map((o) => [o, o])], cur, (v) => push({ ["f_" + fl.key]: v })) : h("input", { id: "fd_" + fl.key, type: "text", maxlength: 100, value: cur, onchange: (e) => push({ ["f_" + fl.key]: e.target.value }) }); filters.insertBefore(h("div", { class: "field" }, h("label", { for: "fd_" + fl.key }, fl.label), inp), filters.lastChild); } } catch { /* filters optional */ }
   const head = h("div", { class: "row between wrap" }, h("h1", null, f.q ? `Results for “${f.q}”` : "Shop"), h("div", { class: "row" },
-    store.get("compare", []).length > 1 ? h("a", { class: "btn sm", href: "#/compare" }, "Compare") : null,
     h("label", { class: "sr-only", for: "f_sort" }, "Sort"), sel("f_sort", [["relevance", "Relevance"], ["newest", "Newest"], ["popularity", "Popularity"], ["price_asc", "Price: low to high"], ["price_desc", "Price: high to low"]], f.sort, (v) => push({ sort: v }))));
   async function load() {
     const p = new URLSearchParams({ page: String(page), limit: "12", sort: f.sort }); for (const k of ["q", "country", "category", "min_price", "max_price", "availability"]) if (f[k]) p.set(k, f[k]); for (const [k, v] of Object.entries(dyn)) p.set(k, v);
@@ -268,14 +267,15 @@ async function productView(ref) {
   p.images.forEach((im, i) => thumbs.append(h("button", { type: "button", "aria-label": `Image ${i + 1}`, onclick: () => show(i) }, safeImg(im.url, im.alt)))); show(0);
   let sku = (p.variants.find((v) => v.in_stock) || p.variants[0]).sku; let qty = 1;
   const priceBox = h("div"); const out = h("output", null, "1");
-  const drawPrice = () => { const v = p.variants.find((x) => x.sku === sku); clear(priceBox).append(h("div", { class: "price", style: "font-size:1.6rem" }, money(v.final_price_minor), p.discount_percent ? h("s", null, money(p.price_minor)) : null), p.tax_rate_bps ? h("div", { class: "small muted" }, `Plus ${(p.tax_rate_bps / 100).toFixed(2)}% tax at checkout`) : h("div", { class: "small muted" }, "Taxes calculated at checkout")); buy.disabled = !v.in_stock; buy.textContent = v.in_stock ? "Add to cart" : "Out of stock"; };
+  const drawPrice = () => { const v = p.variants.find((x) => x.sku === sku); clear(priceBox).append(h("div", { class: "price", style: "font-size:1.6rem" }, money(v.final_price_minor), p.discount_percent ? h("s", null, money(p.price_minor)) : null), p.tax_rate_bps ? h("div", { class: "small muted" }, `Plus ${(p.tax_rate_bps / 100).toFixed(2)}% tax at checkout`) : h("div", { class: "small muted" }, "Taxes calculated at checkout")); buy.disabled = !v.in_stock; buy.textContent = v.in_stock ? "Add to cart" : "Out of stock"; buyNowBtn.disabled = !v.in_stock; };
   const vsel = p.variants.length > 1 ? h("div", { class: "field" }, h("label", { for: "vsel" }, "Option"), h("select", { id: "vsel", onchange: (e) => { sku = e.target.value; drawPrice(); } }, p.variants.map((v) => h("option", { value: v.sku, selected: v.sku === sku, disabled: !v.in_stock }, v.label + (v.in_stock ? "" : " (sold out)"))))) : null;
   const buy = h("button", { class: "btn primary grow", type: "button", onclick: guard(() => addToCart(p.id, sku, qty)) }, "Add to cart");
+  const buyNowBtn = h("button", { class: "btn grow", type: "button", onclick: guard(() => buyNow(p.id, sku, qty)) }, "Buy now");
   const wish = h("button", { class: "btn", type: "button", "aria-pressed": String(state.wishlist.has(p.id)), onclick: guard(() => toggleWish(p.id, wish)) }, "♥ Wishlist");
   const specs = h("dl", { class: "specs" }, [["Country", p.country.name], ["Category", p.category.name + (p.subcategory ? " › " + p.subcategory : "")], ...p.fields.map((f) => [f.label, Array.isArray(f.value) ? f.value.join(", ") : typeof f.value === "object" ? Object.entries(f.value).map(([k, v]) => `${k}: ${v}`).join("; ") : typeof f.value === "boolean" ? (f.value ? "Yes" : "No") : String(f.value)])].flatMap(([k, v]) => [h("dt", null, k), h("dd", null, v)]));
   const root = h("div", { class: "stack" }, h("p", { class: "small" }, h("a", { href: "#/shop" }, "Shop"), " › ", h("a", { href: `#/shop?category=${p.category.id}` }, p.category.name)),
     h("div", { class: "pd" }, h("div", { class: "gallery" }, main, thumbs), h("div", { class: "stack" }, h("h1", null, p.name), h("div", { class: "row wrap" }, availChip(p.availability), stars(p.rating_avg, p.rating_count)), h("p", { class: "muted" }, p.short_description), priceBox, vsel,
-      h("div", { class: "row wrap" }, h("div", { class: "qty" }, h("button", { type: "button", "aria-label": "Decrease quantity", onclick: () => { qty = Math.max(1, qty - 1); out.textContent = qty; } }, "−"), out, h("button", { type: "button", "aria-label": "Increase quantity", onclick: () => { qty = Math.min(20, qty + 1); out.textContent = qty; } }, "+")), buy, wish),
+      h("div", { class: "row wrap" }, h("div", { class: "qty" }, h("button", { type: "button", "aria-label": "Decrease quantity", onclick: () => { qty = Math.max(1, qty - 1); out.textContent = qty; } }, "−"), out, h("button", { type: "button", "aria-label": "Increase quantity", onclick: () => { qty = Math.min(20, qty + 1); out.textContent = qty; } }, "+")), buy, buyNowBtn, wish),
       h("div", { class: "panel" }, h("h3", null, "Delivery & fulfilment"), h("p", { class: "small muted" }, p.delivery_info || "Fulfilment details are shown at checkout.")),
       h("div", { class: "panel" }, h("h3", null, "Refunds & cancellations"), h("p", { class: "small muted" }, p.refund_policy || "Unpaid orders can be cancelled any time. Refunds are issued as store credit to your wallet.")))),
     h("section", { class: "panel" }, h("h2", null, "Description"), h("p", { style: "white-space:pre-wrap" }, p.description || p.short_description)), h("section", { class: "panel" }, h("h2", null, "Specifications"), specs));
@@ -291,14 +291,6 @@ function reviewForm(pid) {
   const f = h("form", { class: "stack" }, h("h3", null, "Write a review"), rating, title, body, h("button", { class: "btn", type: "submit" }, "Submit review"));
   f.addEventListener("submit", guard(async (e) => { e.preventDefault(); await api(`/products/${pid}/reviews`, { method: "POST", body: { rating: Number(rating.value), title: title.value, body: body.value } }); toast("Thanks for your review!", "ok"); route(); })); return f;
 }
-async function compareView() {
-  const ids = store.get("compare", []); if (ids.length < 2) return empty("Select at least two products to compare.", h("a", { class: "btn", href: "#/shop" }, "Browse products"));
-  const { items } = await api("/products/by-ids?ids=" + ids.join(",")); const keys = [...new Set(items.flatMap((p) => p.fields.map((f) => f.label)))];
-  const rowOf = (label, fn) => h("tr", null, h("th", null, label), items.map((p) => h("td", null, fn(p))));
-  return h("div", { class: "stack" }, h("h1", null, "Compare"), h("div", { class: "table-wrap panel" }, h("table", null, h("tbody", null, rowOf("Product", (p) => h("a", { href: "#/p/" + p.slug }, p.name)), rowOf("Price", (p) => money(p.final_price_minor)), rowOf("Country", (p) => p.country.name), rowOf("Category", (p) => p.category.name), rowOf("Availability", (p) => availChip(p.availability)),
-    keys.map((k) => rowOf(k, (p) => { const f = p.fields.find((x) => x.label === k); return f ? (Array.isArray(f.value) ? f.value.join(", ") : String(f.value)) : "—"; }))))), h("button", { class: "btn", type: "button", onclick: () => { store.set("compare", []); route(); } }, "Clear comparison"));
-}
-
 /* ---------- Cart & checkout ---------- */
 async function cartView() {
   if (!state.user) {
@@ -306,19 +298,31 @@ async function cartView() {
     return h("div", { class: "stack" }, h("h1", null, "Your cart"), h("div", { class: "panel" }, h("p", null, `You have ${g.reduce((s, i) => s + i.qty, 0)} item(s) saved on this device.`), h("p", { class: "muted small" }, "Sign in to see live prices, apply membership discounts and check out."), h("button", { class: "btn primary", type: "button", onclick: () => authDialog("login") }, "Sign in to continue")));
   }
   await refreshCart(); const c = state.cart; if (!c || !c.items.length) return empty("Your cart is empty.", h("a", { class: "btn primary", href: "#/shop" }, "Start shopping"));
-  const method = { v: "oxapay" }; const err = h("div", { class: "error-text", role: "alert" });
+  const method = { v: "plisio" }; const err = h("div", { class: "error-text", role: "alert" });
   const lines = c.items.map((i) => h("div", { class: "panel row" }, h("div", { style: "width:72px;height:72px;flex:none;border-radius:10px;overflow:hidden" }, safeImg(i.image, i.name)),
     h("div", { class: "grow" }, h("a", { href: "#/p/" + i.slug }, h("strong", null, i.name)), h("div", { class: "small muted" }, i.variant_label), h("div", null, money(i.unit_price_minor), " × ", i.qty), !i.available ? h("div", { class: "error-text" }, "Not enough stock for this quantity") : null),
     h("div", { class: "stack" }, h("div", { class: "qty" }, h("button", { type: "button", "aria-label": "Decrease", onclick: guard(async () => { await setQty(i.product_id, i.sku, i.qty - 1); route(); }) }, "−"), h("output", null, String(i.qty)), h("button", { type: "button", "aria-label": "Increase", onclick: guard(async () => { await setQty(i.product_id, i.sku, Math.min(20, i.qty + 1)); route(); }) }, "+")),
       h("button", { class: "btn sm danger", type: "button", onclick: guard(async () => { await setQty(i.product_id, i.sku, 0); route(); }) }, "Remove"))));
   const totals = h("div", { class: "panel stack" }, h("h3", null, "Order summary"), ...[["Subtotal", c.subtotal_minor], c.member_discount_minor ? ["Member discount", -c.member_discount_minor] : null, ["Tax", c.tax_minor]].filter(Boolean).map(([l, v]) => h("div", { class: "row between" }, h("span", { class: "muted" }, l), h("span", null, money(v)))), h("div", { class: "row between price" }, h("span", null, "Total"), h("span", null, money(c.total_minor))),
-    h("fieldset", { style: "border:0;padding:0;margin:0" }, h("legend", { class: "small muted" }, "Payment method"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", checked: true, onchange: () => (method.v = "oxapay") }), "Cryptocurrency (secure hosted checkout)"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", onchange: () => (method.v = "wallet") }), "Wallet balance")), err,
-    h("button", { class: "btn primary", type: "button", id: "payBtn", onclick: async (e) => { e.currentTarget.disabled = true; err.textContent = ""; try { const r = await api("/checkout", { method: "POST", body: { payment_method: method.v }, headers: { "Idempotency-Key": (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()) } }); state.cart = null; updateCartBadge(); const o = r.order; if (o.payment_url && /^https:\/\/([a-z0-9-]+\.)*oxapay\.com\//i.test(o.payment_url)) { toast("Redirecting to the secure payment page…"); location.assign(o.payment_url); } else { location.hash = "#/orders/" + o.number; } } catch (x) { err.textContent = x.message; e.currentTarget.disabled = false; } } }, "Place order & pay"),
+    h("fieldset", { style: "border:0;padding:0;margin:0" }, h("legend", { class: "small muted" }, "Payment method"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", checked: true, onchange: () => (method.v = "plisio") }), "Cryptocurrency (secure hosted checkout)"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", onchange: () => (method.v = "wallet") }), "Wallet balance")), err,
+    h("button", { class: "btn primary", type: "button", id: "payBtn", onclick: async (e) => { e.currentTarget.disabled = true; err.textContent = ""; try { const r = await api("/checkout", { method: "POST", body: { payment_method: method.v }, headers: { "Idempotency-Key": (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()) } }); state.cart = null; updateCartBadge(); const o = r.order; if (o.payment_url && /^https:\/\/([a-z0-9-]+\.)*plisio\.(net|com)\//i.test(o.payment_url)) { toast("Redirecting to the secure payment page…"); location.assign(o.payment_url); } else { location.hash = "#/orders/" + o.number; } } catch (x) { err.textContent = x.message; e.currentTarget.disabled = false; } } }, "Place order & pay"),
     h("p", { class: "small muted" }, "Your order is confirmed only after the payment provider verifies your payment with our server."));
   return h("div", { class: "stack" }, h("h1", null, "Your cart"), ...(c.problems && c.problems.length ? [h("div", { class: "panel error-text", role: "alert" }, c.problems.join(" · "))] : []), h("div", { class: "shop", style: "grid-template-columns:1fr" }, h("div", { class: "stack" }, lines), totals));
 }
 
 /* ---------- Orders ---------- */
+function deliveryCard(text) {
+  const inner = h("div", { class: "delivery stack" });
+  text.split(/\r?\n/).forEach((line) => {
+    const t = line.trim(); if (!t) return;
+    if (t.startsWith("### ")) inner.append(h("h4", null, t.slice(4)));
+    else if (t.startsWith("## ")) inner.append(h("h3", null, t.slice(3)));
+    else if (t.startsWith("# ")) inner.append(h("h2", { class: "del-head" }, t.slice(2)));
+    else inner.append(h("p", { class: "mono" }, t));
+  });
+  const copy = h("button", { class: "btn sm", type: "button", onclick: async () => { try { await navigator.clipboard.writeText(text); toast("Copied.", "ok"); } catch { toast("Copy failed - select the text manually.", "bad"); } } }, "Copy");
+  return h("div", { class: "panel" }, h("div", { class: "row between" }, h("strong", { class: "small muted" }, "DELIVERY"), copy), inner);
+}
 const statusChip = (s) => h("span", { class: "chip " + (s === "paid" ? "ok" : ["pending", "created"].includes(s) ? "warn" : "bad") }, s);
 async function orderView(number) {
   if (!requireLogin()) return empty("Sign in to view your orders.");
@@ -328,9 +332,22 @@ async function orderView(number) {
       o.points_earned ? h("p", { class: "small muted" }, `Reward points earned: ${o.points_earned}`) : null, o.refund_total_minor ? h("p", { class: "small muted" }, `Refunded to wallet: ${money(o.refund_total_minor, o.currency)}`) : null),
     h("div", { class: "panel" }, h("h3", null, "Timeline"), o.history.map((x) => h("div", { class: "small" }, `${fmtDate(x.at)} — ${x.status}`))));
   if (["created", "pending"].includes(o.status)) {
-    box.append(h("div", { class: "panel stack" }, h("p", null, "Waiting for payment confirmation from the provider. This page updates automatically; returning from the payment page does not by itself confirm your order."),
-      o.payment_url ? h("a", { class: "btn primary", href: o.payment_url, rel: "noopener" }, "Open payment page") : null, h("button", { class: "btn danger", type: "button", onclick: guard(async () => { await api(`/orders/${o.number}/cancel`, { method: "POST" }); toast("Order cancelled.", "ok"); route(); }) }, "Cancel order")));
-    const t = setTimeout(() => { if (parseHash().parts[1] === number) route(); }, 8000); window.addEventListener("hashchange", () => clearTimeout(t), { once: true });
+    const verifyOnce = guard(async () => { const r = await api(`/orders/${o.number}/check`, { method: "POST" }); if (r.order.status !== o.status) { toast("Payment confirmed!", "ok"); route(); } else toast("Still waiting for the payment network…"); });
+    box.append(h("div", { class: "panel stack" }, h("p", null, "Waiting for payment confirmation from the provider. This page updates itself every few seconds; returning from the payment page does not by itself confirm your order."),
+      h("div", { class: "row wrap" }, o.payment_url ? h("a", { class: "btn primary", href: o.payment_url, rel: "noopener" }, "Open payment page") : null,
+        h("button", { class: "btn", type: "button", onclick: verifyOnce }, "I've paid - verify now"),
+        h("button", { class: "btn danger", type: "button", onclick: guard(async () => { await api(`/orders/${o.number}/cancel`, { method: "POST" }); toast("Order cancelled.", "ok"); route(); }) }, "Cancel order"))));
+    let tries = 0;
+    const t = setInterval(() => {
+      tries++;
+      if (tries > 15 || parseHash().parts[1] !== number) { clearInterval(t); return; }
+      api(`/orders/${number}/check`, { method: "POST" }).then((r) => { if (!["created", "pending"].includes(r.order.status)) { clearInterval(t); toast("Payment confirmed!", "ok"); route(); } }).catch(() => {});
+    }, 5000);
+    window.addEventListener("hashchange", () => clearInterval(t), { once: true });
+  }
+  if (o.deliveries && Object.keys(o.deliveries).length) {
+    box.append(h("div", { class: "panel stack" }, h("h3", null, "Your digital items"), h("p", { class: "small muted" }, "These details belong to your order - keep them private."),
+      Object.entries(o.deliveries).flatMap(([, arr]) => arr.map((text) => deliveryCard(text)))));
   }
   return box;
 }
@@ -364,7 +381,8 @@ async function accOrders() {
 }
 async function accWallet() {
   const w = await api("/wallet");
-  return h("div", { class: "stack" }, h("div", { class: "balance" }, h("div", { class: "small muted" }, "Balance"), h("div", { class: "amount" }, money(w.balance_minor, w.currency))), h("h2", null, "Transactions"),
+  return h("div", { class: "stack" }, h("div", { class: "balance" }, h("div", { class: "small muted" }, "Balance"), h("div", { class: "amount" }, money(w.balance_minor, w.currency)),
+    h("div", { class: "row wrap" }, h("button", { class: "btn primary sm", type: "button", onclick: guard(async () => { const r = await api("/wallet/check", { method: "POST" }); toast(`Balance: ${money(r.balance_minor, r.currency)}`, "ok"); route(); }) }, "Verify pending top-ups"))), h("h2", null, "Transactions"),
     w.ledger.length ? h("div", { class: "panel table-wrap" }, h("table", null, h("thead", null, h("tr", null, ["Date", "Type", "Amount", "Status"].map((x) => h("th", null, x)))), h("tbody", null, w.ledger.map((e) => h("tr", null, h("td", null, fmtDate(e.created_at)), h("td", null, e.type), h("td", null, money(e.amount_minor, w.currency)), h("td", null, e.status)))))) : empty("No wallet activity yet."));
 }
 async function accWishlist() {
