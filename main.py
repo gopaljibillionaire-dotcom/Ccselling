@@ -61,6 +61,9 @@ def db() -> Any:
 
 
 async def ensure_indexes(d: Any) -> None:
+# ... (Previous imports and code remain unchanged up to the ensure_indexes function) ...
+
+async def ensure_indexes(d: Any) -> None:
     ix = lambda col, keys, **kw: d[col].create_index(keys, **kw)  # noqa: E731
     A, D = ASCENDING, DESCENDING
     await ix("users", [("email", A)], unique=True)
@@ -113,8 +116,7 @@ async def ensure_indexes(d: Any) -> None:
     await ix("newsletter", [("email", A)], unique=True)
     await ix("captcha_used", [("nonce", A)], unique=True)
     await ix("captcha_used", [("expires_at", A)], expireAfterSeconds=0)
-    await ix("config", [("_id", A)], unique=True)
-
+    # The _id field is automatically indexed by MongoDB; no need to create it explicitly.
 
 DEFAULT_TIERS = [
     {"key": "basic", "name": "Basic", "threshold_minor": 0, "discount_bps": 0, "reward_multiplier_bps": 10000,
