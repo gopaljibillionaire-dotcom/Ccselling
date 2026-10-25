@@ -439,15 +439,17 @@ def verify_hmac_sha512(raw_body: bytes, header_value: Optional[str], key: str) -
 # ---------------------------------------------------------------------------
 def build_csp(nonce: str) -> str:
     img_hosts = " ".join(f"https://{h}" for h in settings.image_host_allowlist)
+    # Allow Google Fonts (admin + storefront), SVG data-URI captcha images, and API calls
+    # to the same origin or any origin the admin panel may be pointed at (Server URL field).
     return "; ".join(
         [
             "default-src 'self'",
             f"script-src 'self' 'nonce-{nonce}'",
-            f"style-src 'self' 'nonce-{nonce}'",
+            f"style-src 'self' 'nonce-{nonce}' https://fonts.googleapis.com",
             "style-src-attr 'unsafe-inline'",  # DOM-built inline style attributes only; scripts stay nonce-locked
-            f"img-src 'self' data: {img_hosts}".strip(),
-            "font-src 'self'",
-            "connect-src 'self'",
+            f"img-src 'self' data: blob: {img_hosts}".strip(),
+            "font-src 'self' https://fonts.gstatic.com data:",
+            "connect-src 'self' https: http://localhost:* http://127.0.0.1:*",
             "object-src 'none'",
             "base-uri 'none'",
             "frame-ancestors 'none'",
