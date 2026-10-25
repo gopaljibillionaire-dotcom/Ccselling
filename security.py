@@ -449,7 +449,7 @@ def build_csp(nonce: str) -> str:
             "style-src-attr 'unsafe-inline'",  # DOM-built inline style attributes only; scripts stay nonce-locked
             f"img-src 'self' data: blob: {img_hosts}".strip(),
             "font-src 'self' https://fonts.gstatic.com data:",
-            "connect-src 'self' https: http://localhost:* http://127.0.0.1:*",
+            "connect-src 'self' https: http: ws: wss:",
             "object-src 'none'",
             "base-uri 'none'",
             "frame-ancestors 'none'",
