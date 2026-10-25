@@ -361,8 +361,26 @@ const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("the
 
 /* ---------- captcha ---------- */
 let capId = "";
-async function loadCap() { $("#cap").value = ""; try { const c = await api("/auth/captcha"); capId = c.id; $("#capImg").src = c.image; } catch (e) { $("#loginErr").textContent = e.message; } }
-$("#capNew").addEventListener("click", loadCap);
+async function loadCap() {
+  const img = $("#capImg");
+  const err = $("#loginErr");
+  $("#cap").value = "";
+  if (img) { img.removeAttribute("src"); img.alt = "Loading security code…"; }
+  try {
+    const c = await api("/auth/captcha");
+    if (!c || !c.id || !c.image) throw new Error("Captcha response incomplete");
+    capId = c.id;
+    if (img) {
+      img.onload = () => { img.alt = "Security code"; };
+      img.onerror = () => { err.textContent = "Captcha image failed to render. Click ↻ to retry."; };
+      img.src = c.image;
+    }
+  } catch (e) {
+    if (err) err.textContent = e.message || "Could not load security code";
+    if (img) img.alt = "Security code unavailable";
+  }
+}
+$("#capNew").addEventListener("click", (e) => { e.preventDefault(); loadCap(); });
 
 /* ---------- login / MFA ---------- */
 function signedOut(msg) { st.token = null; st.csrf = null; st.user = null; SS.del("tok"); $("#capBox").classList.remove("hide"); setTimeout(loadCap, 0); $("#appView").classList.add("hide"); $("#loginView").classList.remove("hide"); if (msg) $("#loginErr").textContent = msg; }
@@ -610,7 +628,7 @@ VIEWS.settings = async () => {
 };
 
 /* resume session after reload */
-st.base = SS.get("base") || ""; loadCap();
+st.base = SS.get("base") || ""; setTimeout(loadCap, 0);
 (async () => { const t = SS.get("tok"); if (!t) return; st.base = SS.get("base") || ""; st.token = t; try { const r = await api("/auth/me"); st.user = r.user; st.csrf = r.csrf; await start(); } catch { signedOut(); } })();
 })();
 </script>
