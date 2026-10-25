@@ -41,6 +41,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 import security as sec
 from config import ConfigError, settings
 from security import utcnow
+from PIL import Image, ImageDraw, ImageFont
 
 log = logging.getLogger("market")
 BASE_DIR = Path(__file__).resolve().parent
@@ -1294,27 +1295,61 @@ def _cap_mac(msg: str) -> str:
     return hmac.new(key, msg.encode(), hashlib.sha256).hexdigest()[:32]
 
 
-def captcha_svg(text: str) -> str:
+def _captcha_font(size: int):
+    """Best available TTF; falls back to PIL default bitmap font."""
+    for path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+    ):
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def captcha_png(text: str) -> bytes:
+    """Render a high-contrast PNG captcha (works in every browser, CSP-safe as data:image/png)."""
     rnd = secrets.SystemRandom()
     w, h = 210, 70
-    cols = ["#e8eefc", "#67e8f9", "#93c5fd", "#c4b5fd", "#a5f3fc"]
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
-             '<defs><linearGradient id="b" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1430"/><stop offset="1" stop-color="#16285a"/></linearGradient></defs>',
-             f'<rect width="{w}" height="{h}" rx="12" fill="url(#b)"/>']
-    for _ in range(5):  # background squiggles
-        y1, y2, y3 = (rnd.randint(8, h - 8) for _ in range(3))
-        parts.append(f'<path d="M0 {y1} C {w // 3} {y2}, {2 * w // 3} {y3}, {w} {rnd.randint(8, h - 8)}" stroke="{rnd.choice(cols)}" stroke-opacity=".28" stroke-width="1.4" fill="none"/>')
-    for _ in range(36):  # speckle
-        parts.append(f'<circle cx="{rnd.randint(2, w - 2)}" cy="{rnd.randint(2, h - 2)}" r="{rnd.choice((0.8, 1.1, 1.6))}" fill="{rnd.choice(cols)}" fill-opacity=".35"/>')
-    step = (w - 36) / len(text)
+    img = Image.new("RGB", (w, h), (11, 20, 48))
+    draw = ImageDraw.Draw(img)
+    # soft gradient-ish bands
+    for y in range(h):
+        shade = 11 + int(12 * (y / h))
+        draw.line([(0, y), (w, y)], fill=(shade, shade + 8, shade + 28))
+    # noise dots
+    cols = [(232, 238, 252), (103, 232, 249), (147, 197, 253), (196, 181, 253), (165, 243, 252)]
+    for _ in range(90):
+        x, y = rnd.randint(0, w - 1), rnd.randint(0, h - 1)
+        r = rnd.choice((1, 1, 2))
+        c = rnd.choice(cols)
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=c)
+    # squiggle lines
+    for _ in range(4):
+        pts = [(rnd.randint(0, w), rnd.randint(0, h)) for _ in range(4)]
+        draw.line(pts, fill=rnd.choice(cols), width=2)
+    # characters
+    font = _captcha_font(rnd.randint(30, 36))
+    step = (w - 28) / max(len(text), 1)
     for i, ch in enumerate(text):
-        x = 20 + i * step + rnd.randint(-3, 3)
-        y = h / 2 + 12 + rnd.randint(-6, 6)
-        parts.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{rnd.randint(30, 38)}" font-weight="700" font-family="Verdana, DejaVu Sans, Arial, sans-serif" '
-                     f'fill="{rnd.choice(cols)}" transform="rotate({rnd.randint(-24, 24)} {x:.1f} {y:.1f})">{ch}</text>')
-    parts.append(f'<path d="M6 {rnd.randint(22, 48)} Q {w // 2} {rnd.randint(8, 62)}, {w - 6} {rnd.randint(22, 48)}" stroke="#e8eefc" stroke-opacity=".55" stroke-width="1.6" fill="none"/>')
-    parts.append("</svg>")
-    return "".join(parts)
+        x = 14 + i * step + rnd.randint(-2, 2)
+        y = rnd.randint(12, 22)
+        # slight shadow for readability
+        draw.text((x + 1, y + 1), ch, font=font, fill=(0, 0, 0))
+        draw.text((x, y), ch, font=font, fill=rnd.choice(cols))
+    # foreground strike
+    draw.line(
+        [(6, rnd.randint(20, 50)), (w // 2, rnd.randint(10, 60)), (w - 6, rnd.randint(20, 50))],
+        fill=(232, 238, 252),
+        width=2,
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
 def captcha_make() -> dict:
@@ -1323,8 +1358,12 @@ def captcha_make() -> dict:
     nonce, exp = secrets.token_hex(8), int(time.time()) + CAPTCHA_TTL
     body = f"{nonce}.{exp}.{_cap_mac(f'a|{nonce}|{text}')}"
     token = f"{body}.{_cap_mac('t|' + body)}"
-    svg = captcha_svg(text)
-    return {"id": token, "image": "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode(), "expires_in": CAPTCHA_TTL}
+    png = captcha_png(text)
+    return {
+        "id": token,
+        "image": "data:image/png;base64," + base64.b64encode(png).decode(),
+        "expires_in": CAPTCHA_TTL,
+    }
 
 
 async def captcha_check(token: str, answer: str) -> None:
