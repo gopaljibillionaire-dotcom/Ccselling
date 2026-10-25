@@ -299,7 +299,9 @@ input, select, textarea { background: rgba(255,255,255,.06); border-color: var(-
 dialog { background: linear-gradient(145deg, rgba(30,46,92,.85), rgba(14,24,52,.92)); backdrop-filter: blur(24px) saturate(170%); -webkit-backdrop-filter: blur(24px) saturate(170%); box-shadow: 0 30px 80px rgba(0,0,0,.5), var(--glass-hi); }
 .toast { background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
 .captcha { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-#capImg { border-radius: 12px; border: 1px solid var(--glass-border); background: #0b1430; max-width: calc(100% - 52px); height: auto; user-select: none; }
+#capImg { border-radius: 12px; border: 1px solid var(--line, rgba(120,160,230,.2)); background: #0b1430; width: 210px; max-width: calc(100% - 52px); height: 70px; object-fit: contain; user-select: none; display: block; }
+#capImg[alt="Loading security code…"] { opacity: .55; }
+#capImg[alt="Security code unavailable"] { outline: 1px dashed var(--bad, #f87171); }
 #cap { text-transform: uppercase; letter-spacing: .22em; font-weight: 700; }
 #cap::placeholder { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .delprev strong { font-size: 1.02rem; }
@@ -346,11 +348,24 @@ function toast(m, k = "") { const t = h("div", { class: "toast " + k, role: "sta
 const chip = (s) => h("span", { class: "chip " + (["paid", "published", "active", "ok", "matched", "approved", "delivered"].includes(s) ? "ok" : ["pending", "created", "draft", "open", "unfulfilled", "processing"].includes(s) ? "warn" : ["failed", "expired", "cancelled", "refunded", "suspended", "archived", "mismatch", "rejected"].includes(s) ? "bad" : "") }, s);
 
 async function api(path, { method = "GET", body, raw } = {}) {
-  const hd = { Accept: "application/json" }; if (st.token) hd.Authorization = "Bearer " + st.token; if (body !== undefined) hd["Content-Type"] = "application/json";
-  let r; try { r = await fetch(st.base + "/api" + path, { method, headers: hd, body: body !== undefined ? JSON.stringify(body) : undefined }); } catch { throw new Error("Cannot reach the server. Check the Server URL, HTTPS and the ALLOWED_ORIGINS setting."); }
+  const hd = { Accept: "application/json" };
+  if (st.token) hd.Authorization = "Bearer " + st.token;
+  if (body !== undefined) hd["Content-Type"] = "application/json";
+  const base = (st.base || "").replace(/\/+$/, "");
+  const url = base + "/api" + path;
+  let r;
+  try {
+    r = await fetch(url, { method, headers: hd, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: base ? "omit" : "same-origin" });
+  } catch (net) {
+    throw new Error("Cannot reach the server (" + url + "). Check the Server URL, HTTPS and ALLOWED_ORIGINS.");
+  }
   if (raw && r.ok) return r;
-  let d = null; try { d = await r.json(); } catch {}
-  if (!r.ok) { if (r.status === 401 && st.user) { signedOut("Session expired. Please sign in again."); } throw new Error((d && d.error) || "Request failed (" + r.status + ")"); }
+  let d = null;
+  try { d = await r.json(); } catch {}
+  if (!r.ok) {
+    if (r.status === 401 && st.user) signedOut("Session expired. Please sign in again.");
+    throw new Error((d && (d.error || d.detail)) || ("Request failed (" + r.status + ")"));
+  }
   return d;
 }
 const go = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, "bad"); } };
@@ -628,7 +643,13 @@ VIEWS.settings = async () => {
 };
 
 /* resume session after reload */
-st.base = SS.get("base") || ""; setTimeout(loadCap, 0);
+st.base = SS.get("base") || "";
+// Always try captcha after DOM is ready; show clear error if network/CSP blocks it.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", () => setTimeout(loadCap, 30));
+} else {
+  setTimeout(loadCap, 30);
+}
 (async () => { const t = SS.get("tok"); if (!t) return; st.base = SS.get("base") || ""; st.token = t; try { const r = await api("/auth/me"); st.user = r.user; st.csrf = r.csrf; await start(); } catch { signedOut(); } })();
 })();
 </script>
