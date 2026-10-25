@@ -88,20 +88,12 @@ class Settings:
     search_max_query_length: int = field(default_factory=lambda: _int("SEARCH_MAX_QUERY_LENGTH", 80))
 
     # --- Overload / capacity protection -------------------------------------
-    # Global concurrent-request cap per worker. Requests above the cap get 503 + Retry-After
-    # immediately instead of queueing and exhausting the dyno's memory. Sized for a 512MB
-    # dyno running 2 uvicorn workers: 40 concurrent per worker * 2 = ~80 total.
     max_concurrent_requests: int = field(default_factory=lambda: _int("MAX_CONCURRENT_REQUESTS", 40))
-    # If a request waits longer than this for a slot, reject it rather than pile up.
     overload_queue_seconds: int = field(default_factory=lambda: _int("OVERLOAD_QUEUE_SECONDS", 2))
-    # Hard cap on request body size (bytes). Uploads override this separately.
     max_body_bytes: int = field(default_factory=lambda: _int("MAX_BODY_BYTES", 1_000_000))
-    # Cool-down applied when the payment provider returns 502/503: after N failures in the
-    # window, further invoice creation is short-circuited for `provider_cooldown_seconds`.
     provider_breaker_threshold: int = field(default_factory=lambda: _int("PROVIDER_BREAKER_THRESHOLD", 5))
     provider_breaker_window_seconds: int = field(default_factory=lambda: _int("PROVIDER_BREAKER_WINDOW_SECONDS", 120))
     provider_cooldown_seconds: int = field(default_factory=lambda: _int("PROVIDER_COOLDOWN_SECONDS", 30))
-    # Timeout (seconds) applied to all outbound HTTP calls (Plisio, ImgBB).
     outbound_timeout_seconds: int = field(default_factory=lambda: _int("OUTBOUND_TIMEOUT_SECONDS", 15))
 
     # --- Plisio (https://plisio.net/documentation) ---------------------------
@@ -111,8 +103,8 @@ class Settings:
     checkout_reservation_minutes: int = field(default_factory=lambda: _int("CHECKOUT_RESERVATION_MINUTES", 65))
 
     # --- Wallet --------------------------------------------------------------
-    wallet_deposit_min_minor: int = field(default_factory=lambda: _int("WALLET_DEPOSIT_MIN_MINOR", 500))    # $5.00
-    wallet_deposit_max_minor: int = field(default_factory=lambda: _int("WALLET_DEPOSIT_MAX_MINOR", 500000)) # $5000.00
+    wallet_deposit_min_minor: int = field(default_factory=lambda: _int("WALLET_DEPOSIT_MIN_MINOR", 500))
+    wallet_deposit_max_minor: int = field(default_factory=lambda: _int("WALLET_DEPOSIT_MAX_MINOR", 500000))
 
     # --- Rewards & Background Tasks ------------------------------------------
     referral_reward_points: int = field(default_factory=lambda: _int("REFERRAL_REWARD_POINTS", 100))
@@ -147,11 +139,10 @@ class Settings:
         if self.public_app_url:
             origins.add(self.public_app_url)
         if self.admin_allow_file_origin:
-            origins.add("null")  # origin sent by pages opened from file://
+            origins.add("null")
         return sorted(origins)
 
     def validate(self) -> None:
-        """Fail safely: refuse to start in production with missing/weak critical settings."""
         problems: List[str] = []
         if self.cookie_samesite not in {"lax", "strict", "none"}:
             problems.append("COOKIE_SAMESITE must be lax, strict or none")
@@ -189,4 +180,4 @@ settings = load_settings() if os.environ.get("SKIP_CONFIG_VALIDATION") != "1" el
 logging.basicConfig(
     level=getattr(logging, settings.log_level, logging.INFO),
     format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
-    )
+)
