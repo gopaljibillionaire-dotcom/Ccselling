@@ -284,7 +284,7 @@ async def get_session(request: Request) -> Optional[dict]:
     return sess
 
 
-EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook"}
+EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook", "/api/auth/captcha"}
 
 
 async def api_rate_limit(request: Request) -> None:
