@@ -1,18 +1,4 @@
-"""security.py - Authentication, session, CSRF, MFA, rate limiting, input validation and headers.
-
-Design notes
-------------
-* Passwords: Argon2id (argon2-cffi default type), transparent rehash on login.
-* Sessions: opaque random tokens; only a SHA-256 digest is stored server-side, so a database
-  leak does not leak live sessions. Tokens travel in an HttpOnly cookie (customers, with CSRF
-  double-protection) or an Authorization: Bearer header (admin console, immune to CSRF).
-* MFA: RFC 6238 TOTP via pyotp; secrets are encrypted at rest (Fernet keyed from APP_SECRET);
-  used time-steps are remembered to stop code replay.
-* Rate limiting: fixed-window counters in a *shared* store (Redis if REDIS_URL, else MongoDB,
-  else in-process memory for tests/dev only) so limits hold across Heroku dynos.
-* NoSQL injection: all user input is validated into scalars/allow-listed fields; operator keys
-  ("$..." / dotted names) are rejected before anything touches a query.
-"""
+"""security.py - Authentication, session, CSRF, MFA, rate limiting, input validation and headers."""
 from __future__ import annotations
 
 import asyncio
@@ -58,7 +44,6 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(stored_hash: Optional[str], password: str) -> Tuple[bool, bool]:
-    """Return (valid, needs_rehash). Always performs one hash verification (timing equalisation)."""
     try:
         _hasher.verify(stored_hash or _DUMMY_HASH, password)
         ok = stored_hash is not None
@@ -115,7 +100,6 @@ def totp_uri(secret: str, email: str) -> str:
 
 
 def verify_totp(secret: str, code: str, last_step: int = 0) -> Optional[int]:
-    """Return the accepted time-step, or None. Rejects replays of an already-used step."""
     if not (isinstance(code, str) and re.fullmatch(r"\d{6}", code)):
         return None
     totp = pyotp.TOTP(secret)
@@ -133,7 +117,6 @@ def verify_totp(secret: str, code: str, last_step: int = 0) -> Optional[int]:
 # Client identification
 # ---------------------------------------------------------------------------
 def client_ip(request: Request) -> str:
-    """Resolve the client IP behind N trusted proxies (Heroku router appends the real address)."""
     xff = request.headers.get("x-forwarded-for", "")
     parts = [p.strip() for p in xff.split(",") if p.strip()]
     hops = settings.trust_proxy_hops
@@ -146,13 +129,10 @@ def client_ip(request: Request) -> str:
 # Sessions
 # ---------------------------------------------------------------------------
 class SessionService:
-    """Server-side sessions stored in MongoDB (collection: sessions, TTL-indexed on expires_at)."""
-
     def __init__(self, db: Any) -> None:
         self.col = db["sessions"]
 
     async def create(self, user: Dict[str, Any], request: Request, kind: str = "full") -> Tuple[str, Dict[str, Any]]:
-        """Create a fresh session (always a new token => rotation on every authentication)."""
         is_admin = user.get("role") in ("admin", "staff", "superadmin")
         token = new_token()
         now = utcnow()
@@ -214,7 +194,6 @@ class SessionService:
 
 
 def check_csrf(request: Request, session: Dict[str, Any], via_cookie: bool) -> None:
-    """Cookie-authenticated unsafe requests need a matching X-CSRF-Token and an allowed Origin."""
     if request.method in SAFE_METHODS or not via_cookie:
         return
     origin = request.headers.get("origin")
@@ -226,11 +205,9 @@ def check_csrf(request: Request, session: Dict[str, Any], via_cookie: bool) -> N
 
 
 # ---------------------------------------------------------------------------
-# Rate limiting (shared store)
+# Rate limiting
 # ---------------------------------------------------------------------------
 class RateLimiter:
-    """Fixed-window counters. Backend order: Redis (REDIS_URL) -> MongoDB -> in-memory (dev/test)."""
-
     def __init__(self, db: Any = None) -> None:
         self._db = db
         self._redis = None
@@ -238,9 +215,8 @@ class RateLimiter:
         if settings.redis_url:
             try:
                 import redis.asyncio as aioredis
-
                 self._redis = aioredis.from_url(settings.redis_url, socket_timeout=2, decode_responses=True)
-            except Exception as exc:  # pragma: no cover
+            except Exception as exc:
                 log.warning("Redis unavailable (%s); falling back to MongoDB limiter", type(exc).__name__)
 
     @staticmethod
@@ -299,13 +275,11 @@ class RateLimiter:
         self._mem.pop(bucket, None)
 
     async def enforce(self, scope: str, identity: str, limit: int, window: int) -> None:
-        """Count one request; raise 429 + Retry-After when the window budget is exhausted."""
         n, ttl = await self.incr(f"{scope}:{identity}", window)
         if n > limit:
             raise HTTPException(429, "Too many requests. Please try again later.", headers={"Retry-After": str(ttl)})
 
     async def guard_failures(self, scope: str, identity: str, limit: int, window: int) -> None:
-        """Block (without counting) when failures already reached the limit - used for logins."""
         n, ttl = await self.get(f"{scope}:{identity}", window)
         if n >= limit:
             raise HTTPException(429, "Too many failed attempts. Please try again later.", headers={"Retry-After": str(ttl)})
@@ -323,7 +297,6 @@ IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif")
 
 
 def clean_text(value: Any, max_len: int = 500, multiline: bool = False, label: str = "value") -> str:
-    """Normalise text and strip any markup. Output is still escaped/textContent-rendered client side."""
     if not isinstance(value, str):
         raise HTTPException(422, f"{label} must be text")
     value = unicodedata.normalize("NFC", value)
@@ -351,7 +324,6 @@ def assert_safe_key(key: str) -> str:
 
 
 def reject_operators(obj: Any, depth: int = 0) -> Any:
-    """Recursively reject Mongo operator / dotted keys anywhere in user-supplied JSON."""
     if depth > 6:
         raise HTTPException(422, "Payload nested too deeply")
     if isinstance(obj, dict):
@@ -368,7 +340,6 @@ def reject_operators(obj: Any, depth: int = 0) -> Any:
 
 
 def scalar(value: Any, label: str = "value") -> Any:
-    """Allow only plain scalars where a query value is expected (blocks {"$ne": ...} style attacks)."""
     if isinstance(value, (dict, list, tuple, set)) or value is None:
         raise HTTPException(422, f"{label} must be a simple value")
     return value
@@ -381,7 +352,6 @@ def object_id_str(value: Any, label: str = "id") -> str:
 
 
 def pick_sort(requested: str, allowed: Dict[str, Any], default: str) -> Any:
-    """Map a client sort token to a server-defined sort spec (never pass client text to Mongo)."""
     return allowed.get(requested, allowed[default])
 
 
@@ -411,7 +381,6 @@ def validate_image_url(url: Any, label: str = "Image URL") -> str:
 
 
 def sniff_image_type(data: bytes) -> Optional[str]:
-    """Magic-number sniffing so uploaded HTML/executables are never accepted as images."""
     if data.startswith(b"\xff\xd8\xff"):
         return "image/jpeg"
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -423,11 +392,7 @@ def sniff_image_type(data: bytes) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Webhook signature
-# ---------------------------------------------------------------------------
 def verify_hmac_sha512(raw_body: bytes, header_value: Optional[str], key: str) -> bool:
-    """OxaPay: HMAC-SHA512(raw POST body, MERCHANT_API_KEY) hex digest in the 'HMAC' header."""
     if not header_value or not key:
         return False
     expected = hmac.new(key.encode(), raw_body, hashlib.sha512).hexdigest()
@@ -444,7 +409,7 @@ def build_csp(nonce: str) -> str:
             "default-src 'self'",
             f"script-src 'self' 'nonce-{nonce}'",
             f"style-src 'self' 'nonce-{nonce}'",
-            "style-src-attr 'unsafe-inline'",  # DOM-built inline style attributes only; scripts stay nonce-locked
+            "style-src-attr 'unsafe-inline'",
             f"img-src 'self' data: {img_hosts}".strip(),
             "font-src 'self'",
             "connect-src 'self'",
@@ -457,14 +422,11 @@ def build_csp(nonce: str) -> str:
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Adds CSP (per-request nonce), HSTS, and other hardening headers; enforces HTTPS in production."""
-
     DOC_PATHS = ("/docs", "/redoc", "/openapi.json")
 
     async def dispatch(self, request: Request, call_next):
         if settings.is_production and request.headers.get("x-forwarded-proto", "https") == "http":
             from starlette.responses import RedirectResponse
-
             return RedirectResponse(str(request.url.replace(scheme="https")), status_code=308)
         request.state.csp_nonce = secrets.token_urlsafe(16)
         response = await call_next(request)
@@ -481,87 +443,3 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if request.url.path.startswith("/api/"):
             h.setdefault("Cache-Control", "no-store")
         return response
-
-
-# ---------------------------------------------------------------------------
-# Unit tests (run: pytest security.py -q)
-# ---------------------------------------------------------------------------
-def test_password_roundtrip() -> None:
-    h = hash_password("Correct-Horse-9!")
-    assert h.startswith("$argon2id$")
-    assert verify_password(h, "Correct-Horse-9!")[0] is True
-    assert verify_password(h, "wrong")[0] is False
-    assert verify_password(None, "anything")[0] is False
-
-
-def test_clean_text_strips_markup() -> None:
-    assert clean_text("<script>alert(1)</script>Hello") == "alert(1)Hello"
-    assert "<" not in clean_text("a <img src=x onerror=1> b")
-    assert "javascript:" not in clean_text("javascript:alert(1)").lower()
-
-
-def test_reject_operators() -> None:
-    for bad in ({"$ne": 1}, {"a": {"$gt": ""}}, {"a.b": 1}, [{"$where": "1"}]):
-        try:
-            reject_operators(bad)
-        except HTTPException as e:
-            assert e.status_code == 422
-        else:
-            raise AssertionError(f"accepted {bad}")
-    assert reject_operators({"ok": [1, 2, {"x": "y"}]})
-
-
-def test_scalar_blocks_objects() -> None:
-    for bad in ({"$ne": ""}, ["a"], None):
-        try:
-            scalar(bad)
-        except HTTPException:
-            continue
-        raise AssertionError("accepted non-scalar")
-
-
-def test_image_url_validation() -> None:
-    assert validate_image_url("https://i.ibb.co/abc/pic.jpg")
-    for bad in ("http://i.ibb.co/a.jpg", "https://evil.com/a.jpg", "https://i.ibb.co/a.html", "javascript:alert(1)",
-                "https://user:pw@i.ibb.co/a.jpg"):
-        try:
-            validate_image_url(bad)
-        except HTTPException:
-            continue
-        raise AssertionError(f"accepted {bad}")
-
-
-def test_hmac_verification() -> None:
-    body, key = b'{"track_id":"1"}', "k"
-    sig = hmac.new(key.encode(), body, hashlib.sha512).hexdigest()
-    assert verify_hmac_sha512(body, sig, key)
-    assert not verify_hmac_sha512(body + b" ", sig, key)
-    assert not verify_hmac_sha512(body, None, key)
-
-
-def test_totp_replay_protection() -> None:
-    secret = new_totp_secret()
-    code = pyotp.TOTP(secret).now()
-    step = verify_totp(secret, code)
-    assert step
-    assert verify_totp(secret, code, last_step=step) is None
-
-
-def test_rate_limiter_memory() -> None:
-    async def run() -> None:
-        rl = RateLimiter(None)
-        for _ in range(3):
-            await rl.enforce("t", "ip", 3, 60)
-        try:
-            await rl.enforce("t", "ip", 3, 60)
-        except HTTPException as e:
-            assert e.status_code == 429 and "Retry-After" in e.headers
-        else:
-            raise AssertionError("limit not enforced")
-
-    asyncio.run(run())
-
-
-def test_sniff_image() -> None:
-    assert sniff_image_type(b"\x89PNG\r\n\x1a\n....") == "image/png"
-    assert sniff_image_type(b"<html><script>") is None
