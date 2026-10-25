@@ -1,10 +1,4 @@
-"""main.py - FastAPI backend for the marketplace (single-module, section-organised).
-
-Sections: 1 Setup/DB  2 Helpers  3 Auth deps  4 Models  5 Catalog helpers  6 Inventory
-7 Wallet/Rewards  8 Orders/Payments  9 Public+Customer routes  10 Admin routes  11 App/CLI/tests
-
-Backend is the source of truth for prices, stock, permissions, payment status and rewards.
-"""
+"""main.py - FastAPI backend for the marketplace (single-module, section-organised)."""
 from __future__ import annotations
 
 import asyncio
@@ -48,9 +42,6 @@ ROLE_LEVEL = {"customer": 0, "support": 1, "admin": 2, "superadmin": 3}
 STAFF_ROLES = {"support", "admin", "superadmin"}
 
 
-# =============================================================================
-# 1. SETUP / DATABASE
-# =============================================================================
 class AppState:
     client: Any = None
     db: Any = None
@@ -70,7 +61,6 @@ def db() -> Any:
 
 
 async def ensure_indexes(d: Any) -> None:
-    """Idempotent index creation (also run on Heroku release phase)."""
     ix = lambda col, keys, **kw: d[col].create_index(keys, **kw)  # noqa: E731
     A, D = ASCENDING, DESCENDING
     await ix("users", [("email", A)], unique=True)
@@ -123,6 +113,7 @@ async def ensure_indexes(d: Any) -> None:
     await ix("newsletter", [("email", A)], unique=True)
     await ix("captcha_used", [("nonce", A)], unique=True)
     await ix("captcha_used", [("expires_at", A)], expireAfterSeconds=0)
+    await ix("config", [("_id", A)], unique=True)
 
 
 DEFAULT_TIERS = [
@@ -147,7 +138,6 @@ DEFAULT_SITE = {"_id": "site", "brand_name": settings.brand_name, "tagline": "Pr
 
 
 async def seed_defaults(d: Any) -> None:
-    """Seed configuration (not products): membership tiers, country list and site settings."""
     if await d["memberships"].count_documents({"kind": "tier"}) == 0:
         for t in DEFAULT_TIERS:
             await d["memberships"].update_one({"key": t["key"]}, {"$setOnInsert": {**t, "kind": "tier"}}, upsert=True)
@@ -157,15 +147,11 @@ async def seed_defaults(d: Any) -> None:
     await d["site_settings"].update_one({"_id": "site"}, {"$setOnInsert": DEFAULT_SITE}, upsert=True)
 
 
-# =============================================================================
-# 2. HELPERS
-# =============================================================================
 def oid(value: Any, label: str = "id") -> ObjectId:
     return ObjectId(sec.object_id_str(value, label))
 
 
 def money_to_minor(value: Any, label: str = "amount", allow_zero: bool = True) -> int:
-    """Parse a decimal string/number into integer minor units (2 dp). Never uses float math."""
     try:
         d = Decimal(str(value).strip())
     except (InvalidOperation, AttributeError):
@@ -197,14 +183,13 @@ def iso(dt: Any) -> Optional[str]:
 
 async def audit(request: Optional[Request], action: str, actor: Any = None, target: Any = None,
                 meta: Optional[dict] = None, category: str = "admin", level: str = "info") -> None:
-    """Append-only audit trail. Failures to write must never break the request."""
     try:
         await db()["audit_logs"].insert_one({
             "action": action, "actor_id": actor, "target": str(target) if target is not None else None,
             "meta": meta or {}, "category": category, "level": level, "created_at": utcnow(),
             "ip": sec.client_ip(request) if request else None,
         })
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         log.error("audit write failed: %s", type(exc).__name__)
 
 
@@ -251,9 +236,6 @@ def tier_for(user: dict, tiers: List[dict]) -> dict:
     return chosen
 
 
-# =============================================================================
-# 3. AUTH DEPENDENCIES
-# =============================================================================
 async def get_session(request: Request) -> Optional[dict]:
     if getattr(request.state, "session_loaded", False):
         return request.state.session
@@ -273,7 +255,6 @@ EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook"}
 
 
 async def api_rate_limit(request: Request) -> None:
-    """Global limiter: 100 req / 15 min per authenticated user, or per IP when anonymous."""
     if request.url.path in EXEMPT_LIMIT or not request.url.path.startswith("/api/"):
         return
     sess = await get_session(request) if S.sessions else None
@@ -314,9 +295,6 @@ admin_user = require_role("admin")
 superadmin_user = require_role("superadmin")
 
 
-# =============================================================================
-# 4. MODELS (extra="forbid" blocks mass-assignment of fields like role/balance)
-# =============================================================================
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -368,7 +346,6 @@ class CartItemIn(Strict):
 
 class CheckoutIn(Strict):
     payment_method: Literal["plisio", "wallet"] = "plisio"
-    # "Buy now": purchase just this one item, leaving the saved cart untouched.
     buy_now: Optional[CartItemIn] = None
 
 
@@ -416,7 +393,6 @@ class VariantIn(Strict):
 
 
 class DeliveryIn(Strict):
-    """One placeholder of the digital delivery: a heading plus the content the buyer receives after paying."""
     label: str = Field(min_length=1, max_length=60)
     value: str = Field(min_length=1, max_length=4000)
     kind: Literal["text", "link", "secret"] = "text"
@@ -434,7 +410,6 @@ class ProductIn(Strict):
     images: List[ImageIn] = Field(default_factory=list, max_length=12)
     variants: List[VariantIn] = Field(default_factory=list, max_length=40)
     stock: int = Field(default=0, ge=0, le=1_000_000)
-    low_stock_threshold: int = Field(default=5, ge=0, le=100000)
     fields: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list, max_length=15)
     featured: bool = False
@@ -452,10 +427,8 @@ class CategoryIn(Strict):
     name: str = Field(min_length=2, max_length=60)
     parent_id: Optional[str] = None
     description: str = Field(default="", max_length=300)
-    image_url: Optional[str] = None
     enabled: bool = True
     featured: bool = False
-    order: int = Field(default=0, ge=0, le=10000)
 
 
 class ReorderIn(Strict):
@@ -520,10 +493,6 @@ class ImportIn(Strict):
     reason: str = Field(min_length=3, max_length=200)
 
 
-class ThresholdIn(Strict):
-    low_stock_threshold: int = Field(ge=0, le=100000)
-
-
 class TierIn(Strict):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,19}$")
     name: str = Field(min_length=1, max_length=30)
@@ -546,6 +515,7 @@ class SiteIn(Strict):
     invite_only: Optional[bool] = None
     tax_rate_bps: Optional[int] = Field(default=None, ge=0, le=5000)
     points_per_unit: Optional[int] = Field(default=None, ge=0, le=100)
+    plisio_api_key: Optional[str] = Field(default=None, max_length=200)
 
 
 class RefundIn(Strict):
@@ -579,11 +549,7 @@ class TicketStatusIn(Strict):
     status: Literal["open", "pending", "closed"]
 
 
-# =============================================================================
-# 5. CATALOG HELPERS
-# =============================================================================
 def validate_field_value(fd: dict, raw: Any, country_codes: set) -> Any:
-    """Validate one dynamic field value against its definition. Returns a normalised, JSON/BSON-safe value."""
     label, t = fd["label"], fd["type"]
     if raw is None or raw == "" or raw == []:
         if fd.get("required"):
@@ -650,7 +616,6 @@ def validate_field_value(fd: dict, raw: Any, country_codes: set) -> Any:
 
 
 async def schema_fields_for(category_id: Optional[ObjectId]) -> Dict[str, dict]:
-    """Merged global + category schema fields (category overrides global by key)."""
     async def load():
         return [s async for s in db()["product_schemas"].find({"active": True})]
     schemas = await cached("schemas", load, 10)
@@ -674,8 +639,6 @@ def stock_state(p: dict) -> str:
     avail = sum(v.get("available", 0) for v in p.get("variants", []))
     if avail <= 0:
         return "out_of_stock"
-    if avail <= p.get("low_stock_threshold", 0):
-        return "low_stock"
     return "in_stock"
 
 
@@ -694,7 +657,6 @@ def jsonable(v: Any) -> Any:
 
 
 async def public_product(p: dict, detail: bool = False, ctx: Optional[dict] = None) -> dict:
-    """Public projection: no raw stock counts, reserved/sold figures, or internal fields."""
     ctx = ctx or await catalog_ctx()
     c = ctx["countries"].get(p.get("country"), {})
     cat = ctx["categories"].get(p.get("category_id"), {})
@@ -728,7 +690,6 @@ async def public_product(p: dict, detail: bool = False, ctx: Optional[dict] = No
 
 
 def clean_delivery(items: List[DeliveryIn]) -> List[dict]:
-    """Sanitise admin-entered delivery placeholders. Links must be http(s); everything else is plain text."""
     out = []
     for d in items:
         label = sec.clean_text(d.label, 60)
@@ -742,7 +703,6 @@ def clean_delivery(items: List[DeliveryIn]) -> List[dict]:
 
 
 async def build_product_doc(body: ProductIn, existing: Optional[dict] = None) -> dict:
-    """Validate a ProductIn against live country/category/schema data and build the DB document."""
     ctx = await catalog_ctx()
     code = body.country.upper()
     if code not in ctx["countries"]:
@@ -770,7 +730,7 @@ async def build_product_doc(body: ProductIn, existing: Optional[dict] = None) ->
     for v in variants_in:
         vp = money_to_minor(v.price, "Variant price", allow_zero=False) if v.price else None
         base = old.get(v.sku)
-        if base:  # keep inventory counters; stock only changes through the inventory endpoints
+        if base:
             variants.append({**base, "label": sec.clean_text(v.label, 60), "price_minor": vp})
         else:
             variants.append({"sku": v.sku, "label": sec.clean_text(v.label, 60), "price_minor": vp, "stock": v.stock,
@@ -788,7 +748,7 @@ async def build_product_doc(body: ProductIn, existing: Optional[dict] = None) ->
         "description": sec.clean_text(body.description, 8000, multiline=True), "price_minor": price_minor,
         "discount_percent": body.discount_percent, "final_price_minor": apply_discount(price_minor, body.discount_percent),
         "country": code, "category_id": cat_id, "subcategory": sec.clean_text(body.subcategory, 60), "images": images,
-        "variants": variants, "low_stock_threshold": body.low_stock_threshold, "fields": fields,
+        "variants": variants, "fields": fields,
         "tags": [sec.clean_text(t, 30) for t in body.tags], "featured": body.featured, "status": body.status,
         "delivery_info": sec.clean_text(body.delivery_info, 500), "refund_policy": sec.clean_text(body.refund_policy, 1000),
         "delivery_fields": clean_delivery(body.delivery),
@@ -809,9 +769,6 @@ PRODUCT_SORTS = {"newest": [("created_at", DESCENDING)], "price_asc": [("final_p
                  "price_desc": [("final_price_minor", DESCENDING)], "popularity": [("sold_total", DESCENDING), ("created_at", DESCENDING)]}
 
 
-# =============================================================================
-# 6. INVENTORY (atomic conditional updates; stock is taken when payment is verified - nothing is reserved)
-# =============================================================================
 async def log_movement(product_id: ObjectId, sku: str, kind: str, d_stock: int, d_avail: int, d_res: int,
                        reason: str = "", actor: Any = None, order_id: Optional[ObjectId] = None) -> None:
     doc = {"product_id": product_id, "sku": sku, "type": kind, "delta_stock": d_stock, "delta_available": d_avail,
@@ -838,11 +795,6 @@ async def adjust_stock(pid: ObjectId, sku: str, delta: int, reason: str, actor: 
 
 
 async def commit_sale(order: dict) -> bool:
-    """Take the stock at the moment payment is verified (there is no reservation while people shop or wait to pay).
-
-    Each line is decremented atomically only if enough is still available. If any line is already gone
-    (someone else paid first), the lines taken so far are put back and False is returned.
-    """
     taken: List[dict] = []
     for it in order["items"]:
         res = await db()["products"].update_one(
@@ -852,7 +804,7 @@ async def commit_sale(order: dict) -> bool:
             taken.append(it)
             await log_movement(it["product_id"], it["sku"], "sale", -it["qty"], -it["qty"], 0, "payment verified", None, order["_id"])
             continue
-        for t in taken:  # undo the lines already taken
+        for t in taken:
             await db()["products"].update_one(
                 {"_id": t["product_id"], "variants.sku": t["sku"]},
                 {"$inc": {"variants.$.stock": t["qty"], "variants.$.available": t["qty"], "variants.$.sold": -t["qty"], "sold_total": -t["qty"]}})
@@ -862,7 +814,6 @@ async def commit_sale(order: dict) -> bool:
 
 
 async def refund_sold_out(order: dict) -> None:
-    """Paid, but the item was bought by someone else a moment earlier: give the money back as wallet credit."""
     fresh = await transition("orders", order["_id"], "refunded", note="item sold out before payment cleared", extra={"refund_total_minor": order["total_minor"]})
     if fresh is None:
         return
@@ -872,11 +823,7 @@ async def refund_sold_out(order: dict) -> None:
     await audit(None, "order.sold_out_refund", target=order["number"], category="order", level="warn")
 
 
-# =============================================================================
-# 7. WALLET & REWARDS
-# =============================================================================
 async def wallet_post(user_id: ObjectId, delta_minor: int, kind: str, idem_key: str, ref: str = "", actor: Any = None, note: str = "") -> dict:
-    """Idempotent ledger posting. Ledger row is inserted first (unique idempotency key), then balance moves atomically."""
     await db()["wallet_accounts"].update_one({"user_id": user_id}, {"$setOnInsert": {"user_id": user_id, "balance_minor": 0, "currency": settings.default_currency, "created_at": utcnow()}}, upsert=True)
     entry = {"user_id": user_id, "type": kind, "amount_minor": delta_minor, "ref": ref, "idempotency_key": idem_key,
              "status": "pending", "actor_id": actor, "note": note, "created_at": utcnow()}
@@ -906,7 +853,7 @@ async def award_points(user: dict, order: dict) -> None:
     try:
         await db()["reward_ledger"].insert_one({"user_id": user["_id"], "ref": str(order["_id"]), "type": "earn", "points": pts, "order_number": order["number"], "created_at": utcnow()})
     except DuplicateKeyError:
-        return  # webhook retry: reward already granted
+        return
     await db()["users"].update_one({"_id": user["_id"]}, {"$inc": {"points_balance": pts}})
     await db()["orders"].update_one({"_id": order["_id"]}, {"$set": {"points_earned": pts}})
 
@@ -915,9 +862,6 @@ async def notify(user_id: ObjectId, title: str, body: str) -> None:
     await db()["notifications"].insert_one({"user_id": user_id, "title": title, "body": body, "read": False, "created_at": utcnow()})
 
 
-# =============================================================================
-# 8. ORDERS & PAYMENTS (Plisio)
-# =============================================================================
 ORDER_TRANSITIONS = {"created": {"pending", "failed", "cancelled", "expired", "paid"}, "pending": {"paid", "failed", "expired", "cancelled"},
                      "paid": {"refunded"}, "failed": set(), "expired": set(), "cancelled": set(), "refunded": set()}
 
@@ -927,7 +871,6 @@ def can_transition(old: str, new: str) -> bool:
 
 
 async def transition(col: str, doc_id: Any, new: str, note: str = "", actor: Any = None, extra: Optional[dict] = None) -> Optional[dict]:
-    """Atomic state change; only succeeds from states that may legally move to `new`."""
     from_states = [s for s, targets in ORDER_TRANSITIONS.items() if new in targets]
     return await db()[col].find_one_and_update(
         {"_id": doc_id, "status": {"$in": from_states}},
@@ -936,7 +879,6 @@ async def transition(col: str, doc_id: Any, new: str, note: str = "", actor: Any
 
 
 async def price_cart(user: dict, items: List[dict], strict: bool = False) -> dict:
-    """Server-side pricing from current DB data. Client-supplied prices are never read."""
     if not items:
         return {"lines": [], "subtotal_minor": 0, "member_discount_minor": 0, "tax_minor": 0, "total_minor": 0, "currency": settings.default_currency}
     ids = [oid(i["product_id"]) for i in items]
@@ -975,24 +917,30 @@ def public_order(o: dict, pay: Optional[dict] = None) -> dict:
          "refund_total_minor": o.get("refund_total_minor", 0), "history": [{"status": h["status"], "at": iso(h["at"])} for h in o.get("history", [])]}
     if pay and o["status"] in ("created", "pending") and pay.get("payment_url"):
         d["payment_url"] = pay["payment_url"]
-    if o["status"] == "paid":  # digital goods: the buyer only ever sees delivery content after payment is verified
+    if o["status"] == "paid":
         d["deliveries"] = o.get("deliveries", [])
     return d
 
 
+async def get_plisio_key() -> str:
+    """Get the Plisio API key from DB config if set, otherwise fall back to env."""
+    conf = await db()["config"].find_one({"_id": "plisio"})
+    if conf and conf.get("api_key"):
+        return conf["api_key"]
+    return settings.plisio_api_key
+
+
 async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
-    """Call the Plisio API. Auth: 'api_key' query parameter. Plisio ONLY uses GET."""
-    if not settings.plisio_enabled:
-        raise HTTPException(503, "Payments are not configured. Set PLISIO_API_KEY.")
+    api_key = await get_plisio_key()
+    if not api_key:
+        raise HTTPException(503, "Payments are not configured. Set PLISIO_API_KEY or update it in admin settings.")
     assert S.http is not None
     url = f"{settings.plisio_base_url}{path}"
     headers = {"Content-Type": "application/json"}
-
     payload = params or {}
-    payload["api_key"] = settings.plisio_api_key
+    payload["api_key"] = api_key
 
     try:
-        # Plisio strictly requires GET requests
         r = await S.http.get(url, params=payload, headers=headers)
         log.info("Plisio response status=%s body=%s", r.status_code, r.text[:500])
         data = r.json()
@@ -1000,19 +948,16 @@ async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
         log.error("Plisio request failed: %s - %s", type(exc).__name__, str(exc))
         raise HTTPException(502, "Payment provider is temporarily unavailable. Please try again.")
 
-    # Plisio returns {"status": "success", "data": {...}} or {"status": "error", "data": {...}}
     if r.status_code != 200:
         log.error("Plisio HTTP error status=%s body=%s", r.status_code, r.text[:500])
         raise HTTPException(502, "Payment provider rejected the request. Please contact support if this persists.")
 
-    # Check status field - Plisio uses "success" for successful responses
     status_field = data.get("status", "").lower()
     if status_field == "error":
         error_msg = data.get("data", {}).get("message", "Unknown error")
         log.error("Plisio API error: %s", error_msg)
         raise HTTPException(502, f"Payment provider error: {error_msg}")
 
-    # Plisio wraps response in "data" key
     result = data.get("data")
     if result is None:
         log.error("Plisio response missing 'data' field: %s", json.dumps(data)[:500])
@@ -1023,7 +968,6 @@ async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
 
 async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
     await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
-
     amount = float(Decimal(amount_minor) / 100)
 
     data = await plisio_request("/invoices/new", {
@@ -1049,7 +993,6 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
         log.error("Plisio response missing invoice_url: %s", json.dumps(data)[:500])
         raise HTTPException(502, "Payment provider returned an unexpected response (missing payment URL).")
 
-    # Validate the invoice URL host and scheme before trusting it
     parsed = urlparse(invoice_url)
     host = (parsed.hostname or "").lower()
     allowed_hosts = ("plisio.net", "plisio.com", "payplisio.net")
@@ -1058,21 +1001,10 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
         raise HTTPException(502, "Payment provider returned an unexpected response (invalid URL).")
 
     pay = {
-        "provider": "plisio",
-        "purpose": purpose,
-        "reference": reference,
-        "order_id": order_id,
-        "user_id": user["_id"],
-        "track_id": str(txn_id),
-        "payment_url": invoice_url,
-        "expected_minor": amount_minor,
-        "currency": settings.default_currency,
-        "status": "pending",
-        "verified_minor": None,
-        "verification": None,
-        "sandbox": settings.plisio_sandbox,
-        "created_at": utcnow(),
-        "updated_at": utcnow(),
+        "provider": "plisio", "purpose": purpose, "reference": reference, "order_id": order_id, "user_id": user["_id"],
+        "track_id": str(txn_id), "payment_url": invoice_url, "expected_minor": amount_minor,
+        "currency": settings.default_currency, "status": "pending", "verified_minor": None, "verification": None,
+        "sandbox": settings.plisio_sandbox, "created_at": utcnow(), "updated_at": utcnow(),
         "history": [{"status": "pending", "at": utcnow(), "note": "invoice created", "actor": None}],
     }
     await db()["payment_records"].insert_one(pay)
@@ -1082,8 +1014,6 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
 async def provider_state(track_id: str) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", track_id):
         raise HTTPException(502, "Invalid provider reference")
-    # Plisio uses /operations/{id} to get transaction status. Depending on API version the fields are
-    # either at the top level of "data" or nested under "operation" - accept both.
     data = await plisio_request(f"/operations/{track_id}")
     if isinstance(data, dict) and isinstance(data.get("operation"), dict):
         data = {**data, **data["operation"]}
@@ -1096,17 +1026,10 @@ def map_provider_status(raw: str) -> str:
         return "paid"
     if s in ("expired", "cancelled", "canceled", "error", "failed"):
         return "failed"
-    return "pending"  # new / pending / pending internal / mismatch (waiting for the rest of the payment)
+    return "pending"
 
 
 def verify_amounts(pay: dict, data: dict) -> Optional[str]:
-    """Return None when provider data is consistent with our record, else a reason string.
-
-    Plisio reports TWO amounts: `amount` / `currency` are the CRYPTO side (e.g. 0.00031 BTC) while
-    `source_amount` / `source_currency` are the FIAT value we asked for (e.g. 20.00 USD). The fiat side
-    is the one that must be compared with what we expected - comparing the crypto amount with the
-    dollar amount was what kept paid deposits from ever being credited.
-    """
     ref = str(data.get("order_number") or "")
     if ref and ref != pay["reference"]:
         return "order reference mismatch"
@@ -1115,21 +1038,18 @@ def verify_amounts(pay: dict, data: dict) -> Optional[str]:
         return "currency mismatch"
     raw_amt = data.get("source_amount")
     if raw_amt in (None, ""):
-        # Provider status is read directly from Plisio with our API key; "completed" already means the
-        # invoice was paid in full, so a missing fiat figure is not grounds to reject the payment.
         return None
     try:
         paid = Decimal(str(raw_amt))
     except (InvalidOperation, TypeError):
         return "amount malformed"
     expected = Decimal(pay["expected_minor"]) / 100
-    if paid + Decimal("0.01") < expected:  # overpaying is fine; underpaying beyond 1 cent is not
+    if paid + Decimal("0.01") < expected:
         return f"amount mismatch (expected {minor_to_str(pay['expected_minor'])}, provider {paid})"
     return None
 
 
 async def apply_provider_state(pay: dict, data: dict, source: str) -> str:
-    """Idempotently apply an independently verified provider state to payment, order and wallet."""
     new = map_provider_status(data.get("status", ""))
     mismatch = verify_amounts(pay, data)
     verification = {"checked_at": utcnow(), "provider_status": data.get("status"), "ok": mismatch is None, "reason": mismatch, "source": source}
@@ -1157,9 +1077,11 @@ async def apply_provider_state(pay: dict, data: dict, source: str) -> str:
 
 
 async def refresh_payment(pay: dict, source: str = "poll", min_gap: float = 4.0) -> str:
-    """Ask Plisio for the live state of a pending payment and apply it immediately (credits wallet / settles order)."""
-    if pay.get("provider") != "plisio" or pay.get("status") != "pending" or not pay.get("track_id") or not settings.plisio_enabled:
+    if pay.get("provider") != "plisio" or pay.get("status") != "pending" or not pay.get("track_id"):
         return pay.get("status", "")
+    api_key = await get_plisio_key()
+    if not api_key:
+        return "pending"
     now = time.time()
     if now - float(pay.get("last_polled_ts") or 0) < min_gap:
         return "pending"
@@ -1175,7 +1097,7 @@ async def settle_order(pay: dict) -> None:
     order = await transition("orders", pay["order_id"], "paid", note="payment verified", extra={"paid_at": utcnow()})
     if order is None:
         order = await db()["orders"].find_one({"_id": pay["order_id"], "status": "paid"})
-        if order is None:  # order already expired/cancelled: keep the money as store credit, flag for review
+        if order is None:
             await wallet_post(pay["user_id"], pay["expected_minor"], "deposit", f"latepay:{pay['track_id']}", ref=pay["reference"], note="payment arrived after order expired")
             await audit(None, "payment.late_after_expiry", target=pay["reference"], category="security", level="warn")
             return
@@ -1187,7 +1109,6 @@ async def claim_flag(order_id: ObjectId, flag: str) -> Optional[dict]:
 
 
 async def issue_delivery(order: dict) -> None:
-    """Snapshot each product's delivery placeholders onto the order so the buyer can see them (and they never change later)."""
     ids = [it["product_id"] for it in order["items"]]
     prods = {p["_id"]: p async for p in db()["products"].find({"_id": {"$in": ids}}, {"delivery_fields": 1, "name": 1})}
     deliveries = []
@@ -1200,7 +1121,6 @@ async def issue_delivery(order: dict) -> None:
 
 
 async def complete_paid_steps(order: dict) -> None:
-    """Every step is claim-guarded, so webhook retries / reconciliation can re-run this safely."""
     if await claim_flag(order["_id"], "inventory_committed"):
         if not await commit_sale(order):
             await refund_sold_out(order)
@@ -1223,18 +1143,18 @@ async def complete_paid_steps(order: dict) -> None:
 
 
 async def sweep_once() -> None:
-    """Reconciliation + expiry of unpaid orders (no stock is held for them). Safe to run concurrently on many dynos."""
     now = utcnow()
-    if settings.plisio_enabled:
+    api_key = await get_plisio_key()
+    if api_key:
         async for pay in db()["payment_records"].find({"status": "pending", "provider": "plisio", "created_at": {"$gt": now - timedelta(hours=3)}}).limit(50):
             await refresh_payment(pay, "sweeper", min_gap=20)
     async for order in db()["orders"].find({"status": {"$in": ["created", "pending"]}, "reservation_expires_at": {"$lt": now}}).limit(50):
         pay = await db()["payment_records"].find_one({"order_id": order["_id"]})
-        if pay and pay.get("track_id") and settings.plisio_enabled:
+        if pay and pay.get("track_id") and api_key:
             try:
                 data = await provider_state(pay["track_id"])
             except HTTPException:
-                continue  # provider outage: retry next sweep
+                continue
             if await apply_provider_state(pay, data, "sweeper") in ("paid", "inconsistent"):
                 continue
         fresh = await transition("orders", order["_id"], "expired", note="payment window closed")
@@ -1251,14 +1171,10 @@ async def sweeper_loop() -> None:
         await asyncio.sleep(max(10, settings.reconcile_interval_seconds))
 
 
-# =============================================================================
-# 9. PUBLIC + CUSTOMER ROUTES
-# =============================================================================
 api = APIRouter(prefix="/api", dependencies=[Depends(api_rate_limit)])
 
 
-# ---- text captcha (stateless signed token + single-use nonce) ------------------------------
-CAPTCHA_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O/1/I/L - nothing ambiguous to read
+CAPTCHA_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 CAPTCHA_LEN, CAPTCHA_TTL = 5, 300
 
 
@@ -1274,10 +1190,10 @@ def captcha_svg(text: str) -> str:
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
              '<defs><linearGradient id="b" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1430"/><stop offset="1" stop-color="#16285a"/></linearGradient></defs>',
              f'<rect width="{w}" height="{h}" rx="12" fill="url(#b)"/>']
-    for _ in range(5):  # background squiggles
+    for _ in range(5):
         y1, y2, y3 = (rnd.randint(8, h - 8) for _ in range(3))
         parts.append(f'<path d="M0 {y1} C {w // 3} {y2}, {2 * w // 3} {y3}, {w} {rnd.randint(8, h - 8)}" stroke="{rnd.choice(cols)}" stroke-opacity=".28" stroke-width="1.4" fill="none"/>')
-    for _ in range(36):  # speckle
+    for _ in range(36):
         parts.append(f'<circle cx="{rnd.randint(2, w - 2)}" cy="{rnd.randint(2, h - 2)}" r="{rnd.choice((0.8, 1.1, 1.6))}" fill="{rnd.choice(cols)}" fill-opacity=".35"/>')
     step = (w - 36) / len(text)
     for i, ch in enumerate(text):
@@ -1301,7 +1217,6 @@ def captcha_make() -> dict:
 
 
 async def captcha_check(token: str, answer: str) -> None:
-    """Raises 422 unless `answer` matches the challenge. Every challenge works once, right or wrong."""
     bad = HTTPException(422, "The security code is wrong or expired. Please try the new one.")
     parts = (token or "").split(".")
     if len(parts) != 4 or not answer:
@@ -1340,7 +1255,8 @@ async def health() -> dict:
             ok = True
         except Exception:
             ok = False
-    return {"status": "ok" if ok else "degraded", "database": "up" if ok else "down", "payments_configured": settings.plisio_enabled,
+    api_key = await get_plisio_key() if S.db is not None else ""
+    return {"status": "ok" if ok else "degraded", "database": "up" if ok else "down", "payments_configured": bool(api_key),
             "uploads_configured": settings.imgbb_enabled, "environment": settings.app_env}
 
 
@@ -1348,15 +1264,15 @@ async def health() -> dict:
 async def public_config() -> dict:
     site = await get_site()
     tiers = await get_tiers()
+    api_key = await get_plisio_key()
     return {"brand_name": site.get("brand_name"), "tagline": site.get("tagline"), "hero_title": site.get("hero_title"), "hero_subtitle": site.get("hero_subtitle"),
             "support_url": site.get("support_url"), "support_email": site.get("support_email"), "terms_url": site.get("terms_url"),
-            "invite_only": site.get("invite_only", False), "currency": settings.default_currency, "payments_enabled": settings.plisio_enabled,
+            "invite_only": site.get("invite_only", False), "currency": settings.default_currency, "payments_enabled": bool(api_key),
             "tax_rate_bps": site.get("tax_rate_bps", 0),
             "tiers": [{"key": t["key"], "name": t["name"], "threshold_minor": t["threshold_minor"], "discount_bps": t["discount_bps"],
                        "reward_multiplier_bps": t["reward_multiplier_bps"], "benefits": t.get("benefits", [])} for t in tiers]}
 
 
-# ---- auth -------------------------------------------------------------------
 @api.get("/auth/captcha")
 async def get_captcha(response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
@@ -1415,7 +1331,6 @@ async def login(body: LoginIn, request: Request, response: Response) -> dict:
     await S.limiter.clear(f"login:{ident}", settings.rl_login_window)
     if rehash:
         await db()["users"].update_one({"_id": user["_id"]}, {"$set": {"password_hash": sec.hash_password(body.password)}})
-    # rotate: any pre-existing session cookie is revoked
     await S.sessions.revoke(request.cookies.get(settings.cookie_name))
     if user.get("role") in STAFF_ROLES:
         if settings.admin_require_mfa:
@@ -1507,7 +1422,6 @@ async def apply_invitation(body: ApplyIn, request: Request) -> dict:
     return {"ok": True, "message": "Application received. You will hear from us if approved."}
 
 
-# ---- account ----------------------------------------------------------------
 @api.patch("/account/profile")
 async def update_profile(body: ProfileIn, user: dict = Depends(current_user)) -> dict:
     upd: Dict[str, Any] = {}
@@ -1557,7 +1471,6 @@ async def revoke_others(request: Request, user: dict = Depends(current_user)) ->
     return {"revoked": await S.sessions.revoke_user(user["_id"], keep_id=request.state.session["_id"])}
 
 
-# ---- catalog ----------------------------------------------------------------
 @api.get("/countries")
 async def list_countries() -> dict:
     ctx = await catalog_ctx()
@@ -1570,12 +1483,11 @@ async def list_categories() -> dict:
     ctx = await catalog_ctx()
     cats = sorted([c for c in ctx["categories"].values() if c.get("enabled", True)], key=lambda c: (c.get("order", 0), c["name"]))
     return {"categories": [{"id": str(c["_id"]), "name": c["name"], "slug": c["slug"], "parent_id": str(c["parent_id"]) if c.get("parent_id") else None,
-                            "description": c.get("description", ""), "image_url": c.get("image_url"), "featured": c.get("featured", False)} for c in cats]}
+                            "description": c.get("description", ""), "featured": c.get("featured", False)} for c in cats]}
 
 
 @api.get("/schemas/public")
 async def public_filters(category_id: Optional[str] = None) -> dict:
-    """Filterable/sortable dynamic fields for the storefront filter panel."""
     sf = await schema_fields_for(oid(category_id) if category_id else None)
     return {"filters": [{"key": k, "label": f["label"], "type": f["type"], "options": f.get("options", [])} for k, f in sf.items() if f.get("filterable") and f.get("public")]}
 
@@ -1608,7 +1520,7 @@ async def list_products(request: Request, q: str = "", country: str = "", catego
     elif availability == "out_of_stock":
         flt["$expr"] = {"$lte": [{"$sum": "$variants.available"}, 0]}
     sf = await schema_fields_for(oid(category) if category else None)
-    for key, val in request.query_params.items():  # dynamic filters arrive as f_<key>=value
+    for key, val in request.query_params.items():
         if key.startswith("f_"):
             fk = key[2:]
             if fk in sf and sf[fk].get("filterable") and sf[fk].get("public"):
@@ -1702,7 +1614,6 @@ async def newsletter(body: NewsletterIn, request: Request) -> dict:
     return {"ok": True}
 
 
-# ---- wishlist / cart ----------------------------------------------------------
 @api.put("/wishlist/{pid}")
 async def wishlist_add(pid: str, user: dict = Depends(current_user)) -> dict:
     await db()["users"].update_one({"_id": user["_id"]}, {"$addToSet": {"wishlist": oid(pid)}})
@@ -1749,7 +1660,6 @@ async def clear_cart(user: dict = Depends(current_user)) -> dict:
     return {"ok": True}
 
 
-# ---- checkout / orders --------------------------------------------------------
 @api.post("/checkout", status_code=201)
 async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=80),
                    user: dict = Depends(current_user)) -> dict:
@@ -1765,7 +1675,7 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
         cart = await db()["carts"].find_one({"user_id": user["_id"]}) or {"items": []}
     if not cart["items"]:
         raise HTTPException(422, "Your cart is empty")
-    if body.payment_method == "plisio" and not settings.plisio_enabled:
+    if body.payment_method == "plisio" and not await get_plisio_key():
         raise HTTPException(503, "Crypto payments are not configured on this server")
     priced = await price_cart(user, cart["items"], strict=True)
     if priced["total_minor"] <= 0:
@@ -1784,7 +1694,7 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
         await db()["orders"].insert_one(order)
     except DuplicateKeyError:
         raise HTTPException(409, "Duplicate checkout request")
-    pay = None  # no stock is reserved here: it is taken only once the payment is verified
+    pay = None
     try:
         if body.payment_method == "wallet":
             await wallet_post(user["_id"], -order["total_minor"], "purchase", f"buy:{number}", ref=number)
@@ -1798,7 +1708,7 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
     except HTTPException:
         await transition("orders", order["_id"], "failed", note="payment initiation failed")
         raise
-    if not body.buy_now:  # "Buy now" leaves whatever is already in the cart alone
+    if not body.buy_now:
         await db()["carts"].update_one({"user_id": user["_id"]}, {"$set": {"items": []}})
     await audit(request, "order.created", user["_id"], target=number, category="order")
     return {"order": public_order(await db()["orders"].find_one({"_id": order["_id"]}), pay)}
@@ -1830,7 +1740,7 @@ async def cancel_order(number: str, request: Request, user: dict = Depends(curre
     if o["status"] not in ("created", "pending"):
         raise HTTPException(409, "Only unpaid orders can be cancelled")
     pay = await db()["payment_records"].find_one({"order_id": o["_id"]})
-    if pay and pay.get("track_id") and settings.plisio_enabled:  # never cancel if the provider already saw money
+    if pay and pay.get("track_id") and await get_plisio_key():
         try:
             if await apply_provider_state(pay, await provider_state(pay["track_id"]), "cancel-check") == "paid":
                 raise HTTPException(409, "Payment was already received for this order")
@@ -1846,15 +1756,12 @@ async def cancel_order(number: str, request: Request, user: dict = Depends(curre
     return {"order": public_order(fresh)}
 
 
-# ---- payments -----------------------------------------------------------------
 @api.post("/payments/plisio/webhook")
 async def plisio_webhook(request: Request) -> Response:
-    """Plisio callback: verification is done via independent server-to-server call."""
     raw = await request.body()
     if len(raw) > 100_000:
         return PlainTextResponse("too large", status_code=413)
     try:
-        # Plisio sends form data, but we verify by making an API call back to them
         payload = json.loads(raw) if raw.startswith(b"{") else dict(await request.form())
         if not payload.get("txn_id"):
             raise ValueError("unsupported payload")
@@ -1871,16 +1778,16 @@ async def plisio_webhook(request: Request) -> Response:
     except DuplicateKeyError:
         ev = await db()["webhook_events"].find_one_and_update({"event_key": key}, {"$inc": {"attempts": 1}})
         if ev and ev.get("processed"):
-            return PlainTextResponse("ok")  # replayed delivery: already handled
+            return PlainTextResponse("ok")
     pay = await db()["payment_records"].find_one({"track_id": str(payload["txn_id"])})
     if not pay:
         await db()["webhook_events"].update_one({"event_key": key}, {"$set": {"processed": True, "result": "unknown_track_id"}})
         await audit(request, "webhook.unknown_track", target=payload["txn_id"], category="security", level="warn")
         return PlainTextResponse("ok")
     try:
-        verified = await provider_state(pay["track_id"])  # independent server-to-server verification
+        verified = await provider_state(pay["track_id"])
     except HTTPException:
-        return PlainTextResponse("provider unavailable", status_code=503)  # Plisio retries later
+        return PlainTextResponse("provider unavailable", status_code=503)
     result = await apply_provider_state(pay, verified, "webhook")
     await db()["webhook_events"].update_one({"event_key": key}, {"$set": {"processed": result != "inconsistent", "result": result, "processed_at": utcnow()}})
     if result == "inconsistent":
@@ -1890,7 +1797,6 @@ async def plisio_webhook(request: Request) -> Response:
 
 @api.post("/payments/{reference}/verify")
 async def verify_payment(reference: str, user: dict = Depends(current_user)) -> dict:
-    """Called when the customer returns from the payment page: asks Plisio directly and credits / settles at once."""
     ref = sec.clean_text(reference, 20).upper()
     pay = await db()["payment_records"].find_one({"reference": ref, "user_id": user["_id"]})
     if not pay:
@@ -1900,7 +1806,6 @@ async def verify_payment(reference: str, user: dict = Depends(current_user)) -> 
     return {"status": pay["status"], "purpose": pay.get("purpose"), "reference": pay["reference"]}
 
 
-# ---- wallet / membership / rewards / referrals ----------------------------------
 @api.get("/wallet")
 async def wallet(user: dict = Depends(current_user)) -> dict:
     pending = 0
@@ -1948,7 +1853,6 @@ async def referrals(user: dict = Depends(current_user)) -> dict:
     return {"code": user.get("referral_code"), "link": f"{settings.public_app_url}/?ref={user.get('referral_code')}", "referred": total, "rewarded": rewarded, "points_per_reward": settings.referral_reward_points}
 
 
-# ---- notifications / support ------------------------------------------------------
 @api.get("/notifications")
 async def notifications(user: dict = Depends(current_user)) -> dict:
     cur = db()["notifications"].find({"user_id": user["_id"]}).sort("created_at", -1).limit(30)
@@ -1987,28 +1891,23 @@ async def ticket_reply(tid: str, body: MessageIn, user: dict = Depends(current_u
     return {"ok": True}
 
 
-# =============================================================================
-# 10. ADMIN ROUTES
-# =============================================================================
 admin = APIRouter(prefix="/api/admin", dependencies=[Depends(api_rate_limit)])
 
 
 @admin.get("/stats")
 async def admin_stats(user: dict = Depends(staff)) -> dict:
     c = lambda col, q: db()[col].count_documents(q)  # noqa: E731
-    low_q = {"status": "published", "$expr": {"$anyElementTrue": {"$map": {"input": "$variants", "as": "v", "in": {"$and": [{"$gt": ["$$v.available", 0]}, {"$lte": ["$$v.available", "$low_stock_threshold"]}]}}}}}
     out_q = {"status": "published", "$expr": {"$lte": [{"$sum": "$variants.available"}, 0]}}
     rev = await (await db()["orders"].aggregate([{"$match": {"status": {"$in": ["paid", "refunded"]}}}, {"$group": {"_id": None, "rev": {"$sum": "$total_minor"}, "ref": {"$sum": "$refund_total_minor"}}}])).to_list(1)
     since = utcnow() - timedelta(days=30)
     return {"currency": settings.default_currency, "customers_total": await c("users", {"role": "customer"}),
             "customers_active": await c("sessions", {"kind": "full", "last_seen": {"$gt": since}}), "products_published": await c("products", {"status": "published"}),
-            "low_stock": await c("products", low_q), "out_of_stock": await c("products", out_q), "orders_total": await c("orders", {}),
+            "out_of_stock": await c("products", out_q), "orders_total": await c("orders", {}),
             "orders_pending": await c("orders", {"status": {"$in": ["created", "pending"]}}), "orders_completed": await c("orders", {"status": "paid"}),
             "payments_pending": await c("payment_records", {"status": "pending"}), "revenue_minor": (rev[0]["rev"] - rev[0]["ref"]) if rev else 0,
             "refunds_minor": rev[0]["ref"] if rev else 0}
 
 
-# ---- products --------------------------------------------------------------------
 @admin.get("/products")
 async def admin_products(q: str = "", status: str = "", page: int = Query(1, ge=1, le=500), user: dict = Depends(staff)) -> dict:
     flt: Dict[str, Any] = {}
@@ -2071,7 +1970,6 @@ async def admin_product_archive(pid: str, request: Request, user: dict = Depends
 
 @admin.post("/uploads")
 async def admin_upload(request: Request, file: UploadFile = File(...), user: dict = Depends(admin_user)) -> dict:
-    """Proxy upload to ImgBB; the API key never leaves the server."""
     if not settings.imgbb_enabled:
         raise HTTPException(503, "Image uploads are disabled. Set IMGBB_API_KEY, or paste an existing ImgBB image URL.")
     await sensitive(request, "upload", str(user["_id"]))
@@ -2094,7 +1992,6 @@ async def admin_upload(request: Request, file: UploadFile = File(...), user: dic
     return {"url": url}
 
 
-# ---- categories / countries / schemas -----------------------------------------------
 @admin.get("/categories")
 async def admin_categories(user: dict = Depends(staff)) -> dict:
     cur = db()["categories"].find({}).sort([("order", 1), ("name", 1)])
@@ -2103,7 +2000,7 @@ async def admin_categories(user: dict = Depends(staff)) -> dict:
 
 def category_doc(body: CategoryIn) -> dict:
     return {"name": sec.clean_text(body.name, 60), "parent_id": oid(body.parent_id) if body.parent_id else None, "description": sec.clean_text(body.description, 300),
-            "image_url": sec.validate_image_url(body.image_url) if body.image_url else None, "enabled": body.enabled, "featured": body.featured, "order": body.order}
+            "enabled": body.enabled, "featured": body.featured}
 
 
 @admin.post("/categories", status_code=201)
@@ -2176,12 +2073,10 @@ async def admin_schema_save(body: SchemaIn, request: Request, user: dict = Depen
 
 @admin.get("/schemas/effective")
 async def admin_schema_effective(category_id: Optional[str] = None, user: dict = Depends(staff)) -> dict:
-    """Merged form definition used by the dynamic product form."""
     sf = await schema_fields_for(oid(category_id) if category_id else None)
     return {"fields": sorted(sf.values(), key=lambda f: f.get("position", 0))}
 
 
-# ---- inventory ---------------------------------------------------------------------
 @admin.get("/inventory")
 async def admin_inventory(q: str = "", page: int = Query(1, ge=1, le=500), user: dict = Depends(staff)) -> dict:
     flt: Dict[str, Any] = {"status": {"$ne": "archived"}}
@@ -2191,7 +2086,7 @@ async def admin_inventory(q: str = "", page: int = Query(1, ge=1, le=500), user:
     async for p in db()["products"].find(flt).sort("name_lc", 1).skip((page - 1) * 25).limit(25):
         for v in p["variants"]:
             rows.append({"product_id": str(p["_id"]), "name": p["name"], "sku": v["sku"], "label": v["label"], "stock": v["stock"],
-                         "available": v.get("available", 0), "sold": v.get("sold", 0), "low_stock_threshold": p.get("low_stock_threshold", 0), "status": p["status"]})
+                         "available": v.get("available", 0), "sold": v.get("sold", 0), "status": p["status"]})
     return {"rows": rows}
 
 
@@ -2209,13 +2104,6 @@ async def admin_inventory_adjust(body: AdjustIn, request: Request, user: dict = 
     await adjust_stock(pid, body.sku, delta, sec.clean_text(body.reason, 200), user["_id"])
     await audit(request, "inventory.adjust", user["_id"], pid, {"sku": body.sku, "delta": delta}, category="inventory")
     return {"ok": True, "delta": delta}
-
-
-@admin.post("/inventory/threshold/{pid}")
-async def admin_threshold(pid: str, body: ThresholdIn, request: Request, user: dict = Depends(admin_user)) -> dict:
-    await db()["products"].update_one({"_id": oid(pid)}, {"$set": {"low_stock_threshold": body.low_stock_threshold}})
-    await audit(request, "inventory.threshold", user["_id"], pid, category="inventory")
-    return {"ok": True}
 
 
 @admin.get("/inventory/movements")
@@ -2259,7 +2147,6 @@ async def admin_inventory_import(body: ImportIn, request: Request, user: dict = 
     return {"applied": applied, "errors": errors}
 
 
-# ---- orders / payments --------------------------------------------------------------
 @admin.get("/orders")
 async def admin_orders(q: str = "", status: str = "", page: int = Query(1, ge=1, le=500), user: dict = Depends(staff)) -> dict:
     flt: Dict[str, Any] = {}
@@ -2295,7 +2182,6 @@ async def admin_fulfillment(number: str, body: FulfillIn, request: Request, user
 
 @admin.post("/orders/{number}/refund")
 async def admin_refund(number: str, body: RefundIn, request: Request, user: dict = Depends(admin_user)) -> dict:
-    """Full refund to store credit (wallet ledger). Crypto payouts back to the payer are an off-platform procedure."""
     o = await db()["orders"].find_one({"number": sec.clean_text(number, 20).upper()})
     if not o:
         raise HTTPException(404, "Order not found")
@@ -2344,8 +2230,10 @@ async def admin_webhooks(user: dict = Depends(admin_user)) -> dict:
 
 @admin.post("/payments/reconcile")
 async def admin_reconcile(request: Request, user: dict = Depends(admin_user)) -> dict:
-    """Re-verify every pending payment with the provider (never trusts admin input as proof of payment)."""
     checked, paid = 0, 0
+    api_key = await get_plisio_key()
+    if not api_key:
+        raise HTTPException(400, "Plisio API key is not configured.")
     async for pay in db()["payment_records"].find({"status": "pending", "provider": "plisio"}).limit(100):
         try:
             res = await apply_provider_state(pay, await provider_state(pay["track_id"]), "reconcile")
@@ -2358,7 +2246,6 @@ async def admin_reconcile(request: Request, user: dict = Depends(admin_user)) ->
     return {"checked": checked, "newly_paid": paid}
 
 
-# ---- users ---------------------------------------------------------------------------
 @admin.get("/users")
 async def admin_users(q: str = "", page: int = Query(1, ge=1, le=500), user: dict = Depends(staff)) -> dict:
     flt: Dict[str, Any] = {}
@@ -2425,7 +2312,6 @@ async def admin_wallet_adjust(uid: str, body: WalletAdjustIn, request: Request, 
     return {"balance_minor": res.get("balance_minor")}
 
 
-# ---- invitations / tiers / settings / tickets / audit -----------------------------------
 @admin.get("/invitations")
 async def admin_invitations(user: dict = Depends(staff)) -> dict:
     cur = db()["invitations"].find({}, {"code_hash": 0}).sort("created_at", -1).limit(100)
@@ -2480,12 +2366,16 @@ async def admin_tier_save(body: TierIn, request: Request, user: dict = Depends(a
 
 @admin.get("/settings")
 async def admin_settings_get(user: dict = Depends(staff)) -> dict:
-    return {"settings": {k: v for k, v in (await get_site()).items() if k != "_id"}}
+    site = await get_site()
+    out = {k: v for k, v in site.items() if k != "_id"}
+    plisio = await db()["config"].find_one({"_id": "plisio"})
+    out["plisio_api_key"] = (plisio or {}).get("api_key", "")
+    return {"settings": out}
 
 
 @admin.put("/settings")
 async def admin_settings_save(body: SiteIn, request: Request, user: dict = Depends(admin_user)) -> dict:
-    upd = {k: v for k, v in body.model_dump().items() if v is not None}
+    upd = {k: v for k, v in body.model_dump().items() if v is not None and k != "plisio_api_key"}
     for k in ("support_url", "terms_url"):
         if upd.get(k):
             upd[k] = sec.validate_https_url(upd[k], k)
@@ -2494,9 +2384,18 @@ async def admin_settings_save(body: SiteIn, request: Request, user: dict = Depen
     for k in ("brand_name", "tagline", "hero_title", "hero_subtitle"):
         if k in upd:
             upd[k] = sec.clean_text(upd[k], 200)
-    await db()["site_settings"].update_one({"_id": "site"}, {"$set": upd}, upsert=True)
+
+    if body.plisio_api_key is not None:
+        key = sec.clean_text(body.plisio_api_key, 200)
+        if key:
+            await db()["config"].update_one({"_id": "plisio"}, {"$set": {"api_key": key}}, upsert=True)
+        else:
+            await db()["config"].delete_one({"_id": "plisio"})
+
+    if upd:
+        await db()["site_settings"].update_one({"_id": "site"}, {"$set": upd}, upsert=True)
     invalidate_cache()
-    await audit(request, "settings.update", user["_id"], meta={"keys": list(upd)})
+    await audit(request, "settings.update", user["_id"], meta={"keys": list(upd) + (["plisio_api_key"] if body.plisio_api_key is not None else [])})
     return {"ok": True}
 
 
@@ -2551,9 +2450,6 @@ async def admin_review_hide(rid: str, request: Request, user: dict = Depends(adm
     return {"ok": True}
 
 
-# =============================================================================
-# 11. APPLICATION FACTORY, STATIC PAGES, ERROR HANDLING, CLI, TESTS
-# =============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     S.http = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
@@ -2658,7 +2554,6 @@ async def favicon() -> Response:
     return Response(svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
 
 
-# ---- CLI --------------------------------------------------------------------------------
 async def _cli(argv: List[str]) -> int:
     if not settings.mongodb_uri:
         print("MONGODB_URI is not set.")
@@ -2702,7 +2597,6 @@ async def _cli(argv: List[str]) -> int:
     return 0
 
 
-# ---- tests (pytest main.py security.py -q) ------------------------------------------------
 def test_money_parsing() -> None:
     assert money_to_minor("49.99") == 4999 and money_to_minor(10) == 1000
     for bad in ("-1", "1.999", "abc", "1e9", "NaN", "10000000"):
@@ -2724,7 +2618,6 @@ def test_state_machine() -> None:
 
 def test_amount_verification() -> None:
     pay = {"expected_minor": 5000, "currency": "USD", "reference": "ORD-1"}
-    # Plisio: amount/currency are CRYPTO (0.0003 BTC); source_amount/source_currency are the fiat value
     ok = {"amount": "0.00031", "currency": "BTC", "source_amount": "50.00", "source_currency": "usd", "order_number": "ORD-1"}
     assert verify_amounts(pay, ok) is None
     assert verify_amounts(pay, {**ok, "source_amount": "49.50"})
