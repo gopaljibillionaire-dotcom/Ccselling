@@ -45,7 +45,7 @@ class Settings:
     # --- Application ---------------------------------------------------------
     app_env: str = field(default_factory=lambda: _env("APP_ENV", "development").lower())
     app_secret: str = field(default_factory=lambda: _env("APP_SECRET"))
-    public_app_url: str = field(default_factory=lambda: _env("PUBLIC_APP_URL", "http://localhost:8000").rstrip("/"))
+    public_app_url: str = field(default_factory=lambda: _env("PUBLIC_APP_URL", "").rstrip("/"))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())
     brand_name: str = field(default_factory=lambda: _env("BRAND_NAME", "CCs shop"))
     default_currency: str = field(default_factory=lambda: _env("DEFAULT_CURRENCY", "USD").upper())
