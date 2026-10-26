@@ -298,10 +298,6 @@ nav.side { background: linear-gradient(180deg, rgba(26,42,88,.6), rgba(10,18,40,
 input, select, textarea { background: rgba(255,255,255,.06); border-color: var(--glass-border); }
 dialog { background: linear-gradient(145deg, rgba(30,46,92,.85), rgba(14,24,52,.92)); backdrop-filter: blur(24px) saturate(170%); -webkit-backdrop-filter: blur(24px) saturate(170%); box-shadow: 0 30px 80px rgba(0,0,0,.5), var(--glass-hi); }
 .toast { background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
-.captcha { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-#capImg { border-radius: 12px; border: 1px solid var(--glass-border); background: #0b1430; max-width: calc(100% - 52px); height: auto; user-select: none; }
-#cap { text-transform: uppercase; letter-spacing: .22em; font-weight: 700; }
-#cap::placeholder { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .delprev strong { font-size: 1.02rem; }
 .btn { justify-content: center; }
 nav.side button { justify-content: flex-start; }
@@ -316,7 +312,6 @@ nav.side button { justify-content: flex-start; }
     <form id="loginForm" novalidate>
       <div class="f"><label for="em">Email</label><input id="em" type="email" autocomplete="username" required></div>
       <div class="f"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
-      <div class="f" id="capBox"><label for="cap">Security code</label><div class="captcha"><img id="capImg" alt="Security code" width="210" height="70" style="min-width:210px;min-height:70px;background:#0b1430;display:block"><button class="btn sm" type="button" id="capNew" aria-label="Get a new code" title="New code">↻</button></div><input id="cap" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="8" placeholder="Type the characters you see"></div>
       <div id="mfaBox" class="hide">
         <div id="mfaSetup" class="hide"><p class="small">Scan this URI with an authenticator app (or enter the secret manually), then enter the 6‑digit code.</p><div class="f"><label>Secret</label><input id="mfaSecret" readonly></div><div class="f"><label>otpauth URI</label><textarea id="mfaUri" readonly></textarea></div></div>
         <div class="f"><label for="otp">Authentication code</label><input id="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
@@ -372,90 +367,20 @@ function modal(title, node) { const d = $("#dlg"); clear(d).append(h("div", { cl
 const field = (label, input, hint) => h("div", { class: "f" }, h("label", null, label), input, hint ? h("div", { class: "hint" }, hint) : null);
 const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("thead", null, h("tr", null, heads.map((x) => h("th", null, x)))), h("tbody", null, rows.length ? rows : h("tr", null, h("td", { colspan: heads.length, class: "muted" }, "Nothing here yet.")))));
 
-/* ---------- captcha ---------- */
-let capId = "";
-function paintCaptcha(dataUrl) {
-  const img = $("#capImg");
-  if (!img) return;
-  // Clear previous blob URLs
-  if (img.dataset.blob) {
-    try { URL.revokeObjectURL(img.dataset.blob); } catch (_) {}
-    delete img.dataset.blob;
-  }
-  img.removeAttribute("src");
-  img.onerror = null;
-  if (!dataUrl) return;
-  // Prefer decoding to Blob — most reliable under CSP
-  try {
-    const m = /^data:image\/svg\+xml;base64,(.+)$/i.exec(dataUrl);
-    if (m) {
-      const bin = atob(m[1]);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const blob = new Blob([bytes], { type: "image/svg+xml" });
-      const obj = URL.createObjectURL(blob);
-      img.dataset.blob = obj;
-      img.src = obj;
-      return;
-    }
-  } catch (_) {}
-  img.src = dataUrl;
-}
-async function loadCap() {
-  const inp = $("#cap");
-  if (inp) inp.value = "";
-  const err = $("#loginErr");
-  try {
-    // Always prefer same-origin when the admin page is served by the app itself.
-    const typed = ($("#apiBase") && $("#apiBase").value || "").trim().replace(/\/$/, "");
-    st.base = typed;
-    const c = await api("/auth/captcha");
-    if (!c || !c.image) throw new Error("Empty captcha response");
-    capId = c.id || "";
-    paintCaptcha(c.image);
-    if (err) err.textContent = "";
-  } catch (e) {
-    // Last resort: hit the raw SVG endpoint
-    try {
-      const base = (st.base || "").replace(/\/$/, "");
-      const r = await fetch(base + "/api/auth/captcha.svg", { cache: "no-store", credentials: base ? "omit" : "same-origin" });
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      capId = r.headers.get("X-Captcha-Id") || "";
-      const blob = await r.blob();
-      const img = $("#capImg");
-      if (img.dataset.blob) { try { URL.revokeObjectURL(img.dataset.blob); } catch (_) {} }
-      const obj = URL.createObjectURL(blob);
-      img.dataset.blob = obj;
-      img.src = obj;
-      if (err) err.textContent = "";
-    } catch (e2) {
-      if (err) err.textContent = (e && e.message ? e.message : "Captcha failed") + " — leave Server URL blank if you opened /admin on this same site.";
-    }
-  }
-}
-if ($("#capNew")) $("#capNew").addEventListener("click", (ev) => { ev.preventDefault(); loadCap(); });
-if ($("#apiBase")) $("#apiBase").addEventListener("change", () => {
-  st.base = ($("#apiBase").value || "").trim().replace(/\/$/, "");
-  SS.set("base", st.base);
-  loadCap();
-});
-
-
 /* ---------- login / MFA ---------- */
-function signedOut(msg) { st.token = null; st.csrf = null; st.user = null; SS.del("tok"); $("#capBox").classList.remove("hide"); setTimeout(loadCap, 0); $("#appView").classList.add("hide"); $("#loginView").classList.remove("hide"); if (msg) $("#loginErr").textContent = msg; }
+function signedOut(msg) { st.token = null; st.csrf = null; st.user = null; SS.del("tok"); $("#appView").classList.add("hide"); $("#loginView").classList.remove("hide"); if (msg) $("#loginErr").textContent = msg; }
 $("#apiBase").value = (SS.get("base") || "");
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault(); $("#loginErr").textContent = ""; const b = $("#apiBase").value.trim().replace(/\/+$/, ""); if (b && !/^https?:\/\//.test(b)) { $("#loginErr").textContent = "Server URL must start with https://"; return; } st.base = b; SS.set("base", b);
   try {
     if (!st.pending) {
-      if (!$("#cap").value.trim()) { $("#loginErr").textContent = "Please type the security code from the picture."; return; }
-      const r = await api("/auth/login", { method: "POST", body: { email: $("#em").value, password: $("#pw").value, captcha_id: capId, captcha_answer: $("#cap").value.trim() } });
-      if (r.mfa_required) { st.pending = r.mfa_token; st.token = r.mfa_token; $("#capBox").classList.add("hide"); $("#mfaBox").classList.remove("hide"); $("#pw").value = ""; $("#loginBtn").textContent = "Verify"; if (!r.mfa_enrolled) { const s = await api("/auth/mfa/setup", { method: "POST" }); $("#mfaSetup").classList.remove("hide"); $("#mfaSecret").value = s.secret; $("#mfaUri").value = s.otpauth_uri; } $("#otp").focus(); }
+      const r = await api("/auth/login", { method: "POST", body: { email: $("#em").value, password: $("#pw").value, captcha_id: "", captcha_answer: "" } });
+      if (r.mfa_required) { st.pending = r.mfa_token; st.token = r.mfa_token; $("#mfaBox").classList.remove("hide"); $("#pw").value = ""; $("#loginBtn").textContent = "Verify"; if (!r.mfa_enrolled) { const s = await api("/auth/mfa/setup", { method: "POST" }); $("#mfaSetup").classList.remove("hide"); $("#mfaSecret").value = s.secret; $("#mfaUri").value = s.otpauth_uri; } $("#otp").focus(); }
       else await finish(r);
     } else { const r = await api("/auth/mfa/verify", { method: "POST", body: { code: $("#otp").value.trim() } }); await finish(r); }
-  } catch (x) { $("#loginErr").textContent = x.message; if (/MFA session/.test(x.message)) resetLogin(); if (!st.pending) loadCap(); }
+  } catch (x) { $("#loginErr").textContent = x.message; if (/MFA session/.test(x.message)) resetLogin(); }
 });
-function resetLogin() { st.pending = null; st.token = null; $("#capBox").classList.remove("hide"); loadCap(); $("#mfaBox").classList.add("hide"); $("#mfaSetup").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; }
+function resetLogin() { st.pending = null; st.token = null; $("#mfaBox").classList.add("hide"); $("#mfaSetup").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; }
 async function finish(r) {
   if (!["support", "admin", "superadmin"].includes(r.user.role)) { st.token = null; throw new Error("This account has no administrative access."); }
   st.token = r.token; st.csrf = r.csrf; st.user = r.user; st.pending = null; SS.set("tok", r.token); resetLoginUi(); await start();
@@ -661,8 +586,6 @@ VIEWS.settings = async () => {
 /* resume session after reload */
 st.base = (SS.get("base") || "").replace(/\/$/, "");
 if ($("#apiBase")) $("#apiBase").value = st.base;
-// Defer captcha until the login form nodes are in the document.
-setTimeout(() => { try { loadCap(); } catch (e) { console.error(e); } }, 0);
 (async () => {
   const t = SS.get("tok");
   if (!t) return;
