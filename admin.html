@@ -361,8 +361,48 @@ const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("the
 
 /* ---------- captcha ---------- */
 let capId = "";
-async function loadCap() { $("#cap").value = ""; try { const c = await api("/auth/captcha"); capId = c.id; $("#capImg").src = c.image; } catch (e) { $("#loginErr").textContent = e.message; } }
+function setCapImage(dataUrl) {
+  const img = $("#capImg");
+  if (!img) return;
+  img.onerror = () => {
+    // Fallback: decode data-URI to a Blob URL (some browsers/CSP combos block long data: SVGs on <img>).
+    try {
+      const m = /^data:image\/svg\+xml;base64,(.+)$/i.exec(dataUrl || "");
+      if (!m) return;
+      const bytes = atob(m[1]);
+      const arr = new Uint8Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+      const blob = new Blob([arr], { type: "image/svg+xml" });
+      img.src = URL.createObjectURL(blob);
+    } catch (_) { /* leave broken icon */ }
+  };
+  img.src = dataUrl || "";
+}
+async function loadCap() {
+  const inp = $("#cap"); if (inp) inp.value = "";
+  try {
+    if (!$("#apiBase").value.trim()) st.base = "";
+    else st.base = $("#apiBase").value.trim().replace(/\/$/, "");
+    const c = await api("/auth/captcha");
+    capId = c.id;
+    setCapImage(c.image);
+    $("#loginErr").textContent = "";
+  } catch (e) {
+    // Fallback: fetch raw SVG endpoint (works when JSON/data-URI path is blocked).
+    try {
+      const r = await fetch((st.base || "") + "/api/auth/captcha.svg", { headers: { Accept: "image/svg+xml" }, cache: "no-store" });
+      if (!r.ok) throw new Error("captcha svg " + r.status);
+      capId = r.headers.get("X-Captcha-Id") || "";
+      const blob = await r.blob();
+      $("#capImg").src = URL.createObjectURL(blob);
+      $("#loginErr").textContent = "";
+    } catch (e2) {
+      $("#loginErr").textContent = (e.message || "Could not load security code") + " — check Server URL is empty when opening /admin from the same host.";
+    }
+  }
+}
 $("#capNew").addEventListener("click", loadCap);
+$("#apiBase").addEventListener("change", () => { st.base = $("#apiBase").value.trim().replace(/\/$/, ""); SS.set("base", st.base); loadCap(); });
 
 /* ---------- login / MFA ---------- */
 function signedOut(msg) { st.token = null; st.csrf = null; st.user = null; SS.del("tok"); $("#capBox").classList.remove("hide"); setTimeout(loadCap, 0); $("#appView").classList.add("hide"); $("#loginView").classList.remove("hide"); if (msg) $("#loginErr").textContent = msg; }
@@ -582,8 +622,21 @@ VIEWS.settings = async () => {
 };
 
 /* resume session after reload */
-st.base = SS.get("base") || ""; loadCap();
-(async () => { const t = SS.get("tok"); if (!t) return; st.base = SS.get("base") || ""; st.token = t; try { const r = await api("/auth/me"); st.user = r.user; st.csrf = r.csrf; await start(); } catch { signedOut(); } })();
+st.base = (SS.get("base") || "").replace(/\/$/, "");
+$("#apiBase").value = st.base;
+loadCap();
+(async () => {
+  const t = SS.get("tok");
+  if (!t) return;
+  st.token = t;
+  try {
+    const r = await api("/auth/me");
+    st.user = r.user; st.csrf = r.csrf;
+    await start();
+  } catch {
+    signedOut();
+  }
+})();
 })();
 </script>
 </body>
