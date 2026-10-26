@@ -368,25 +368,106 @@ const field = (label, input, hint) => h("div", { class: "f" }, h("label", null, 
 const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("thead", null, h("tr", null, heads.map((x) => h("th", null, x)))), h("tbody", null, rows.length ? rows : h("tr", null, h("td", { colspan: heads.length, class: "muted" }, "Nothing here yet.")))));
 
 /* ---------- login / MFA ---------- */
-function signedOut(msg) { st.token = null; st.csrf = null; st.user = null; SS.del("tok"); $("#appView").classList.add("hide"); $("#loginView").classList.remove("hide"); if (msg) $("#loginErr").textContent = msg; }
-$("#apiBase").value = (SS.get("base") || "");
+function signedOut(msg) {
+  st.token = null; st.csrf = null; st.user = null; st.pending = null;
+  SS.del("tok");
+  $("#appView").classList.add("hide");
+  $("#loginView").classList.remove("hide");
+  resetLoginUi();
+  if (msg) $("#loginErr").textContent = msg;
+}
+function resetLoginUi() {
+  st.pending = null;
+  $("#mfaBox").classList.add("hide");
+  $("#mfaSetup").classList.add("hide");
+  $("#loginBtn").textContent = "Continue";
+  $("#otp").value = "";
+  $("#pw").value = "";
+  $("#loginErr").textContent = "";
+}
+function resetLogin() {
+  st.pending = null;
+  st.token = null;
+  resetLoginUi();
+}
+async function finish(r) {
+  if (!r || !r.user || !["support", "admin", "superadmin"].includes(r.user.role)) {
+    st.token = null;
+    throw new Error("This account has no administrative access.");
+  }
+  st.token = r.token;
+  st.csrf = r.csrf;
+  st.user = r.user;
+  st.pending = null;
+  SS.set("tok", r.token);
+  resetLoginUi();
+  await start();
+}
 $("#loginForm").addEventListener("submit", async (e) => {
-  e.preventDefault(); $("#loginErr").textContent = ""; const b = $("#apiBase").value.trim().replace(/\/+$/, ""); if (b && !/^https?:\/\//.test(b)) { $("#loginErr").textContent = "Server URL must start with https://"; return; } st.base = b; SS.set("base", b);
+  e.preventDefault();
+  $("#loginErr").textContent = "";
+  // Server URL: leave blank when /admin is served by this app
+  let b = ($("#apiBase").value || "").trim().replace(/\/+$/, "");
+  if (b && !/^https?:\/\//i.test(b)) {
+    $("#loginErr").textContent = "Server URL must start with http:// or https:// (or leave blank).";
+    return;
+  }
+  st.base = b;
+  SS.set("base", b);
   try {
     if (!st.pending) {
-      const r = await api("/auth/login", { method: "POST", body: { email: $("#em").value, password: $("#pw").value, captcha_id: "", captcha_answer: "" } });
-      if (r.mfa_required) { st.pending = r.mfa_token; st.token = r.mfa_token; $("#mfaBox").classList.remove("hide"); $("#pw").value = ""; $("#loginBtn").textContent = "Verify"; if (!r.mfa_enrolled) { const s = await api("/auth/mfa/setup", { method: "POST" }); $("#mfaSetup").classList.remove("hide"); $("#mfaSecret").value = s.secret; $("#mfaUri").value = s.otpauth_uri; } $("#otp").focus(); }
-      else await finish(r);
-    } else { const r = await api("/auth/mfa/verify", { method: "POST", body: { code: $("#otp").value.trim() } }); await finish(r); }
-  } catch (x) { $("#loginErr").textContent = x.message; if (/MFA session/.test(x.message)) resetLogin(); }
+      const email = ($("#em").value || "").trim();
+      const password = $("#pw").value || "";
+      if (!email || !password) {
+        $("#loginErr").textContent = "Email and password are required.";
+        return;
+      }
+      const r = await api("/auth/login", {
+        method: "POST",
+        body: { email, password, captcha_id: "", captcha_answer: "" }
+      });
+      if (r.mfa_required) {
+        st.pending = r.mfa_token;
+        st.token = r.mfa_token; // bearer for /auth/mfa/* only
+        $("#mfaBox").classList.remove("hide");
+        $("#pw").value = "";
+        $("#loginBtn").textContent = "Verify";
+        if (!r.mfa_enrolled) {
+          try {
+            const s = await api("/auth/mfa/setup", { method: "POST" });
+            $("#mfaSetup").classList.remove("hide");
+            $("#mfaSecret").value = s.secret || "";
+            $("#mfaUri").value = s.otpauth_uri || "";
+          } catch (setupErr) {
+            $("#loginErr").textContent = setupErr.message || "Could not start MFA setup.";
+          }
+        }
+        setTimeout(() => { try { $("#otp").focus(); } catch (_) {} }, 0);
+        return;
+      }
+      await finish(r);
+    } else {
+      const code = ($("#otp").value || "").trim();
+      if (!/^[0-9]{6}$/.test(code)) {
+        $("#loginErr").textContent = "Enter the 6-digit code from your authenticator app.";
+        return;
+      }
+      // ensure bearer is the pending MFA token
+      st.token = st.pending;
+      const r = await api("/auth/mfa/verify", { method: "POST", body: { code } });
+      await finish(r);
+    }
+  } catch (x) {
+    $("#loginErr").textContent = x.message || "Sign-in failed.";
+    if (/MFA session|Authentication required|401/i.test(String(x.message || ""))) {
+      resetLogin();
+    }
+  }
 });
-function resetLogin() { st.pending = null; st.token = null; $("#mfaBox").classList.add("hide"); $("#mfaSetup").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; }
-async function finish(r) {
-  if (!["support", "admin", "superadmin"].includes(r.user.role)) { st.token = null; throw new Error("This account has no administrative access."); }
-  st.token = r.token; st.csrf = r.csrf; st.user = r.user; st.pending = null; SS.set("tok", r.token); resetLoginUi(); await start();
-}
-function resetLoginUi() { $("#mfaBox").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; $("#pw").value = ""; }
-$("#logoutBtn").addEventListener("click", go(async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} signedOut(); }));
+$("#logoutBtn").addEventListener("click", go(async () => {
+  try { await api("/auth/logout", { method: "POST" }); } catch (_) {}
+  signedOut();
+}));
 
 /* ---------- shell ---------- */
 const SECTIONS = [
@@ -586,15 +667,27 @@ VIEWS.settings = async () => {
 /* resume session after reload */
 st.base = (SS.get("base") || "").replace(/\/$/, "");
 if ($("#apiBase")) $("#apiBase").value = st.base;
+// Always show login first; only auto-enter if a full staff session is still valid.
 (async () => {
   const t = SS.get("tok");
-  if (!t) return;
+  if (!t) {
+    $("#loginView").classList.remove("hide");
+    $("#appView").classList.add("hide");
+    return;
+  }
   st.token = t;
   try {
     const r = await api("/auth/me");
-    st.user = r.user; st.csrf = r.csrf;
+    if (!r.user || !["support", "admin", "superadmin"].includes(r.user.role)) {
+      SS.del("tok");
+      signedOut("Please sign in.");
+      return;
+    }
+    st.user = r.user;
+    st.csrf = r.csrf;
     await start();
   } catch {
+    SS.del("tok");
     signedOut();
   }
 })();
