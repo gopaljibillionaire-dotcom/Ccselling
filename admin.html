@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Auralis Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
+<style nonce="{{NONCE}}">
+/* ---------- Design tokens ---------- */
+:root {
+  --bg: #070d1f;
+  --panel: #101a38;
+  --panel-raised: #152347;
+  --line: rgba(120, 160, 230, .2);
+  --line-soft: rgba(120, 160, 230, .12);
+  --text: #e8eefc;
+  --text-dim: #c2d0e8;
+  --muted: #9fb0d4;
+  --accent: #22d3ee;
+  --accent-soft: rgba(34, 211, 238, .12);
+  --accent-border: rgba(34, 211, 238, .4);
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --radius: 14px;
+  --radius-sm: 10px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, .35);
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+/* ---------- Base ---------- */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font: 15px/1.55 var(--font);
+  background: radial-gradient(900px 500px at 90% -10%, rgba(59, 130, 246, .18), transparent), var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1, h2, h3 { margin: 0 0 .5rem; font-weight: 600; letter-spacing: -.01em; }
+h1 { font-size: 1.45rem; }
+h2 { font-size: 1.15rem; }
+h3 { font-size: 1rem; }
+.muted { color: var(--muted); }
+.small { font-size: .82rem; }
+.hide { display: none !important; }
+::selection { background: rgba(34, 211, 238, .3); }
+
+/* ---------- Layout ---------- */
+.layout { display: grid; min-height: 100vh; }
+@media (min-width: 900px) {
+  .layout { grid-template-columns: 240px 1fr; }
+}
+main { padding: 18px; min-width: 0; }
+
+/* ---------- Sidebar nav ---------- */
+nav.side {
+  background: rgba(10, 18, 40, .92);
+  border-right: 1px solid var(--line);
+  padding: 16px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-content: flex-start;
+}
+@media (min-width: 900px) {
+  nav.side {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+}
+nav.side .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 14px;
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -.02em;
+}
+nav.side .brand .logo {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #22d3ee, #3b82f6);
+  display: grid; place-items: center;
+  color: #04111f;
+  font-size: 16px;
+  font-weight: 800;
+}
+nav.side button {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  font: inherit;
+  font-size: .9rem;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+nav.side button:hover { background: rgba(34, 211, 238, .06); color: var(--text); }
+nav.side button[aria-current="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+  font-weight: 500;
+}
+nav.side button .icon { font-size: 1.05rem; width: 1.2em; text-align: center; opacity: .8; }
+
+/* ---------- Panels & cards ---------- */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+  transition: border-color .2s ease;
+}
+.panel:hover { border-color: rgba(120, 160, 230, .3); }
+.panel-raised { background: var(--panel-raised); }
+
+/* ---------- Rows & grids ---------- */
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.between { justify-content: space-between; }
+.grow { flex: 1; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+
+/* ---------- Stats ---------- */
+.stat { font-size: 1.6rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.2; }
+.stat-label { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+
+/* ---------- Buttons ---------- */
+.btn {
+  background: #16234a;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+  font-size: .88rem;
+  cursor: pointer;
+  min-height: 38px;
+  transition: border-color .15s ease, background .15s ease, transform .1s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn:hover { border-color: var(--accent); background: #1c2c5a; }
+.btn:active { transform: scale(.97); }
+.btn.primary {
+  background: linear-gradient(135deg, #22d3ee, #3b82f6);
+  color: #04111f;
+  border: 0;
+  box-shadow: 0 4px 14px rgba(34, 211, 238, .25);
+}
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.danger { color: var(--bad); border-color: rgba(248, 113, 113, .5); }
+.btn.danger:hover { background: rgba(248, 113, 113, .1); border-color: var(--bad); }
+.btn.ghost { background: transparent; }
+.btn.sm { min-height: 30px; padding: 3px 9px; font-size: .8rem; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---------- Forms ---------- */
+input, select, textarea {
+  width: 100%;
+  background: #0a1330;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: .9rem;
+  min-height: 38px;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, .15);
+}
+textarea { min-height: 80px; resize: vertical; }
+input[type=checkbox] { width: auto; min-height: 0; accent-color: var(--accent); }
+label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: 3px; font-weight: 500; }
+.f { margin-bottom: 10px; }
+.hint { font-size: .75rem; color: var(--muted); margin-top: 3px; }
+
+/* ---------- Tables ---------- */
+table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+th, td { padding: 8px 8px; border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+tbody tr { transition: background .15s ease; }
+tbody tr:hover { background: rgba(34, 211, 238, .04); }
+.tw { overflow-x: auto; }
+
+/* ---------- Chips & badges ---------- */
+.chip {
+  display: inline-block;
+  font-size: .72rem;
+  padding: 2px 9px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.chip.ok { color: var(--ok); border-color: rgba(52, 211, 153, .35); background: rgba(52, 211, 153, .08); }
+.chip.warn { color: var(--warn); border-color: rgba(251, 191, 36, .35); background: rgba(251, 191, 36, .08); }
+.chip.bad { color: var(--bad); border-color: rgba(248, 113, 113, .35); background: rgba(248, 113, 113, .08); }
+
+/* ---------- Error & toast ---------- */
+.err { color: var(--bad); min-height: 1.2em; font-size: .85rem; }
+.login { max-width: 420px; margin: 8vh auto; padding: 0 16px; }
+.toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  z-index: 99;
+  max-width: 90vw;
+  box-shadow: var(--shadow);
+  animation: slideIn .25s ease;
+}
+.toast.bad { border-left-color: var(--bad); }
+.toast.ok { border-left-color: var(--ok); }
+@keyframes slideIn { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* ---------- Dialog ---------- */
+dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  width: min(94vw, 620px);
+  max-height: 90vh;
+  padding: 20px;
+  box-shadow: var(--shadow);
+  animation: fadeUp .2s ease;
+}
+dialog::backdrop { background: rgba(3, 8, 20, .75); backdrop-filter: blur(3px); }
+@keyframes fadeUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* ---------- Image preview ---------- */
+.prev { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.prev img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
+
+/* ---------- Warning bar ---------- */
+.warnbar {
+  background: rgba(251, 191, 36, .1);
+  border: 1px solid rgba(251, 191, 36, .35);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+  font-size: .85rem;
+}
+
+/* ---------- Scrollbar ---------- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(120, 160, 230, .25); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(120, 160, 230, .4); }
+
+/* ---------- Login tweaks ---------- */
+.login .panel { padding: 24px; }
+.login h1 { font-size: 1.6rem; }
+
+/* ---------- Glass UI layer ---------- */
+:root { --glass: linear-gradient(145deg, rgba(255,255,255,.09), rgba(255,255,255,.03)); --glass-border: rgba(255,255,255,.13); --glass-hi: inset 0 1px 0 rgba(255,255,255,.12); --blur: blur(20px) saturate(160%); }
+body { background: radial-gradient(500px 500px at 6% 0%, rgba(34,211,238,.2), transparent 70%), radial-gradient(600px 600px at 95% 8%, rgba(99,102,241,.22), transparent 70%), var(--bg); background-attachment: fixed; }
+nav.side { background: linear-gradient(180deg, rgba(26,42,88,.6), rgba(10,18,40,.55)); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border-right: 1px solid var(--glass-border); box-shadow: 8px 0 32px rgba(0,0,0,.25), var(--glass-hi); }
+@media (max-width: 899px) { nav.side { position: sticky; top: 0; z-index: 20; border-right: 0; border-bottom: 1px solid var(--glass-border); overflow-x: auto; flex-wrap: nowrap; } nav.side .brand { padding-bottom: 4px; } nav.side button { white-space: nowrap; } }
+.panel { background: var(--glass); border-color: var(--glass-border); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); box-shadow: 0 10px 32px rgba(0,0,0,.22), var(--glass-hi); }
+.panel-raised { background: linear-gradient(145deg, rgba(255,255,255,.12), rgba(255,255,255,.05)); }
+.btn { background: var(--glass); border-color: var(--glass-border); box-shadow: var(--glass-hi); }
+.btn.primary { background: linear-gradient(135deg, #22d3ee, #3b82f6); box-shadow: 0 6px 20px rgba(34,211,238,.3), inset 0 1px 0 rgba(255,255,255,.4); }
+input, select, textarea { background: rgba(255,255,255,.06); border-color: var(--glass-border); }
+dialog { background: linear-gradient(145deg, rgba(30,46,92,.85), rgba(14,24,52,.92)); backdrop-filter: blur(24px) saturate(170%); -webkit-backdrop-filter: blur(24px) saturate(170%); box-shadow: 0 30px 80px rgba(0,0,0,.5), var(--glass-hi); }
+.toast { background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
+.captcha { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+#capImg { border-radius: 12px; border: 1px solid var(--glass-border); background: #0b1430; max-width: calc(100% - 52px); height: auto; user-select: none; }
+#cap { text-transform: uppercase; letter-spacing: .22em; font-weight: 700; }
+#cap::placeholder { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.delprev strong { font-size: 1.02rem; }
+.btn { justify-content: center; }
+nav.side button { justify-content: flex-start; }
+</style>
+</head>
+<body>
+<div id="loginView" class="login">
+  <div class="panel">
+    <h1>Administration</h1>
+    <p class="muted small">Sign in with your staff account. Admins need multi‑factor authentication. This page holds no credentials; every action is authorised by the backend.</p>
+    <div class="f"><label for="apiBase">Server URL</label><input id="apiBase" type="url" placeholder="https://your-app.herokuapp.com" autocomplete="off"><div class="hint">Leave blank when this page is served by the backend itself.</div></div>
+    <form id="loginForm" novalidate>
+      <div class="f"><label for="em">Email</label><input id="em" type="email" autocomplete="username" required></div>
+      <div class="f"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
+      <div class="f" id="capBox"><label for="cap">Security code</label><div class="captcha"><img id="capImg" alt="Security code" width="210" height="70"><button class="btn sm" type="button" id="capNew" aria-label="Get a new code" title="New code">↻</button></div><input id="cap" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="8" placeholder="Type the characters you see"></div>
+      <div id="mfaBox" class="hide">
+        <div id="mfaSetup" class="hide"><p class="small">Scan this URI with an authenticator app (or enter the secret manually), then enter the 6‑digit code.</p><div class="f"><label>Secret</label><input id="mfaSecret" readonly></div><div class="f"><label>otpauth URI</label><textarea id="mfaUri" readonly></textarea></div></div>
+        <div class="f"><label for="otp">Authentication code</label><input id="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
+      </div>
+      <div id="loginErr" class="err" role="alert"></div>
+      <button class="btn primary" style="width:100%" type="submit" id="loginBtn">Continue</button>
+    </form>
+  </div>
+</div>
+
+<div id="appView" class="layout hide">
+  <nav class="side" id="side" aria-label="Admin sections"></nav>
+  <main><div class="row between"><h1 id="title">Overview</h1><div class="row"><span class="chip" id="who"></span><button class="btn sm ghost" id="logoutBtn" type="button">Sign out</button></div></div><div id="view"></div></main>
+</div>
+<dialog id="dlg"></dialog>
+<script nonce="{{NONCE}}">
+"use strict";
+(() => {
+const $ = (s, r = document) => r.querySelector(s);
+const st = { token: null, csrf: null, user: null, base: "", pending: null, countries: [], cats: [] };
+const SS = { get(k) { try { return sessionStorage.getItem(k); } catch { return null; } }, set(k, v) { try { sessionStorage.setItem(k, v); } catch {} }, del(k) { try { sessionStorage.removeItem(k); } catch {} } };
+function h(tag, a, ...kids) { const e = document.createElement(tag); for (const [k, v] of Object.entries(a || {})) { if (v == null || v === false) continue; if (k === "class") e.className = v; else if (k.startsWith("on") && typeof v === "function") e.addEventListener(k.slice(2), v); else if (v === true) e.setAttribute(k, ""); else e.setAttribute(k, v); } for (const c of kids.flat()) if (c != null && c !== false) e.append(c.nodeType ? c : document.createTextNode(String(c))); return e; }
+const clear = (e) => { while (e.firstChild) e.removeChild(e.firstChild); return e; };
+const money = (m, c = "USD") => { try { return new Intl.NumberFormat(undefined, { style: "currency", currency: c }).format(m / 100); } catch { return (m / 100).toFixed(2); } };
+const when = (s) => s ? new Date(s).toLocaleString() : "";
+function toast(m, k = "") { const t = h("div", { class: "toast " + k, role: "status" }, m); document.body.append(t); setTimeout(() => t.remove(), 4500); }
+const chip = (s) => h("span", { class: "chip " + (["paid", "published", "active", "ok", "matched", "approved", "delivered"].includes(s) ? "ok" : ["pending", "created", "draft", "open", "unfulfilled", "processing"].includes(s) ? "warn" : ["failed", "expired", "cancelled", "refunded", "suspended", "archived", "mismatch", "rejected"].includes(s) ? "bad" : "") }, s);
+
+async function api(path, { method = "GET", body, raw } = {}) {
+  const hd = { Accept: "application/json" }; if (st.token) hd.Authorization = "Bearer " + st.token; if (body !== undefined) hd["Content-Type"] = "application/json";
+  let r; try { r = await fetch(st.base + "/api" + path, { method, headers: hd, body: body !== undefined ? JSON.stringify(body) : undefined }); } catch { throw new Error("Cannot reach the server. Check the Server URL, HTTPS and the ALLOWED_ORIGINS setting."); }
+  if (raw && r.ok) return r;
+  let d = null; try { d = await r.json(); } catch {}
+  if (!r.ok) { if (r.status === 401 && st.user) { signedOut("Session expired. Please sign in again."); } throw new Error((d && d.error) || "Request failed (" + r.status + ")"); }
+  return d;
+}
+const go = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, "bad"); } };
+function confirmBox(msg) { return new Promise((res) => { const d = $("#dlg"); clear(d).append(h("h3", null, "Please confirm"), h("p", null, msg), h("div", { class: "row" }, h("button", { class: "btn danger", type: "button", onclick: () => { d.close(); res(true); } }, "Confirm"), h("button", { class: "btn", type: "button", onclick: () => { d.close(); res(false); } }, "Cancel"))); d.onclose = () => res(false); d.showModal(); }); }
+function modal(title, node) { const d = $("#dlg"); clear(d).append(h("div", { class: "row between" }, h("h3", null, title), h("button", { class: "btn sm ghost", type: "button", onclick: () => d.close() }, "✕")), node); d.onclose = null; d.showModal(); return d; }
+const field = (label, input, hint) => h("div", { class: "f" }, h("label", null, label), input, hint ? h("div", { class: "hint" }, hint) : null);
+const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("thead", null, h("tr", null, heads.map((x) => h("th", null, x)))), h("tbody", null, rows.length ? rows : h("tr", null, h("td", { colspan: heads.length, class: "muted" }, "Nothing here yet.")))));
+
+/* ---------- captcha ---------- */
+let capId = "";
+async function loadCap() { $("#cap").value = ""; try { const c = await api("/auth/captcha"); capId = c.id; $("#capImg").src = c.image; } catch (e) { $("#loginErr").textContent = e.message; } }
+$("#capNew").addEventListener("click", loadCap);
+
+/* ---------- login / MFA ---------- */
+function signedOut(msg) { st.token = null; st.csrf = null; st.user = null; SS.del("tok"); $("#capBox").classList.remove("hide"); setTimeout(loadCap, 0); $("#appView").classList.add("hide"); $("#loginView").classList.remove("hide"); if (msg) $("#loginErr").textContent = msg; }
+$("#apiBase").value = (SS.get("base") || "");
+$("#loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault(); $("#loginErr").textContent = ""; const b = $("#apiBase").value.trim().replace(/\/+$/, ""); if (b && !/^https?:\/\//.test(b)) { $("#loginErr").textContent = "Server URL must start with https://"; return; } st.base = b; SS.set("base", b);
+  try {
+    if (!st.pending) {
+      if (!$("#cap").value.trim()) { $("#loginErr").textContent = "Please type the security code from the picture."; return; }
+      const r = await api("/auth/login", { method: "POST", body: { email: $("#em").value, password: $("#pw").value, captcha_id: capId, captcha_answer: $("#cap").value.trim() } });
+      if (r.mfa_required) { st.pending = r.mfa_token; st.token = r.mfa_token; $("#capBox").classList.add("hide"); $("#mfaBox").classList.remove("hide"); $("#pw").value = ""; $("#loginBtn").textContent = "Verify"; if (!r.mfa_enrolled) { const s = await api("/auth/mfa/setup", { method: "POST" }); $("#mfaSetup").classList.remove("hide"); $("#mfaSecret").value = s.secret; $("#mfaUri").value = s.otpauth_uri; } $("#otp").focus(); }
+      else await finish(r);
+    } else { const r = await api("/auth/mfa/verify", { method: "POST", body: { code: $("#otp").value.trim() } }); await finish(r); }
+  } catch (x) { $("#loginErr").textContent = x.message; if (/MFA session/.test(x.message)) resetLogin(); if (!st.pending) loadCap(); }
+});
+function resetLogin() { st.pending = null; st.token = null; $("#capBox").classList.remove("hide"); loadCap(); $("#mfaBox").classList.add("hide"); $("#mfaSetup").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; }
+async function finish(r) {
+  if (!["support", "admin", "superadmin"].includes(r.user.role)) { st.token = null; throw new Error("This account has no administrative access."); }
+  st.token = r.token; st.csrf = r.csrf; st.user = r.user; st.pending = null; SS.set("tok", r.token); resetLoginUi(); await start();
+}
+function resetLoginUi() { $("#mfaBox").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; $("#pw").value = ""; }
+$("#logoutBtn").addEventListener("click", go(async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} signedOut(); }));
+
+/* ---------- shell ---------- */
+const SECTIONS = [
+  ["overview", "Overview", "◈"], ["products", "Products", "▦"], ["fields", "Product fields", "⚙"],
+  ["categories", "Categories", "▤"], ["countries", "Countries", "🌐"], ["inventory", "Inventory", "📦"],
+  ["orders", "Orders", "🧾"], ["payments", "Payments", "💳"], ["users", "Customers", "👤"],
+  ["invites", "Invitations", "✉"], ["tiers", "Membership", "🏅"], ["tickets", "Support", "💬"],
+  ["reviews", "Reviews", "⭐"], ["settings", "Settings", "🔧"]
+];
+const isAdmin = () => ["admin", "superadmin"].includes(st.user.role);
+async function start() {
+  $("#loginView").classList.add("hide"); $("#appView").classList.remove("hide"); $("#who").textContent = `${st.user.email} · ${st.user.role}`;
+  const [c, k] = await Promise.all([api("/admin/countries"), api("/admin/categories")]); st.countries = c.countries; st.cats = k.categories;
+  const side = clear($("#side"));
+  side.append(h("div", { class: "brand" }, h("div", { class: "logo" }, "A"), "Auralis Admin"));
+  SECTIONS.forEach(([k2, l, icon]) => side.append(h("button", { type: "button", "data-k": k2, onclick: () => show(k2) }, h("span", { class: "icon" }, icon), l)));
+  show("overview");
+}
+async function show(k) {
+  [...$("#side").children].forEach((b) => b.setAttribute("aria-current", String(b.dataset.k === k))); $("#title").textContent = SECTIONS.find((s) => s[0] === k)[1];
+  const v = clear($("#view")); v.append(h("p", { class: "muted" }, "Loading…"));
+  try { const n = await VIEWS[k](); clear(v).append(n); } catch (e) { clear(v).append(h("div", { class: "panel err", role: "alert" }, e.message, " ", h("button", { class: "btn sm", type: "button", onclick: () => show(k) }, "Retry"))); }
+}
+
+/* ---------- views ---------- */
+const VIEWS = {};
+VIEWS.overview = async () => {
+  const s = await api("/admin/stats"); const c = s.currency;
+  const tile = (l, v, accent = false) => h("div", { class: "panel", style: accent ? "border-color:var(--accent-border)" : "" }, h("div", { class: "stat-label" }, l), h("div", { class: "stat", style: accent ? "color:var(--accent)" : "" }, v));
+  return h("div", null, h("div", { class: "grid" },
+    tile("Customers", s.customers_total), tile("Active sessions (30d)", s.customers_active),
+    tile("Published products", s.products_published), 
+    tile("Out of stock", s.out_of_stock), tile("Orders", s.orders_total),
+    tile("Pending orders", s.orders_pending), tile("Completed orders", s.orders_completed),
+    tile("Pending payments", s.payments_pending), tile("Verified revenue (net)", money(s.revenue_minor, c), true),
+    tile("Refunds", money(s.refunds_minor, c))));
+};
+
+/* products + dynamic form */
+VIEWS.products = async () => {
+  let q = "", status = ""; const box = h("div"); const qi = h("input", { placeholder: "Search by name" }); const ss = h("select", null, ["", "draft", "published", "archived"].map((x) => h("option", { value: x }, x || "All statuses")));
+  async function load() { const r = await api(`/admin/products?q=${encodeURIComponent(q)}&status=${status}`); clear(box).append(table(["Product", "Status", "Price", "Availability", ""], r.items.map((p) => h("tr", null, h("td", null, p.name), h("td", null, chip(p.status)), h("td", null, p.price, p.discount_percent ? ` (-${p.discount_percent}%)` : ""), h("td", null, chip(p.availability === "in_stock" ? "ok" : p.availability === "low_stock" ? "pending" : "failed"), " ", p.availability), h("td", null, h("div", { class: "row" }, h("button", { class: "btn sm", type: "button", onclick: () => productForm(p.id) }, "Edit"), isAdmin() ? h("button", { class: "btn sm", type: "button", onclick: go(async () => { await api(`/admin/products/${p.id}/status`, { method: "POST", body: { status: p.status === "published" ? "draft" : "published" } }); load(); }) }, p.status === "published" ? "Unpublish" : "Publish") : null, isAdmin() ? h("button", { class: "btn sm danger", type: "button", onclick: go(async () => { if (await confirmBox(`Archive “${p.name}”? It will disappear from the storefront.`)) { await api(`/admin/products/${p.id}`, { method: "DELETE" }); load(); } }) }, "Archive") : null)))))); }
+  qi.addEventListener("input", () => { q = qi.value; clearTimeout(qi._t); qi._t = setTimeout(go(load), 300); }); ss.addEventListener("change", () => { status = ss.value; go(load)(); });
+  await load(); return h("div", null, h("div", { class: "row between panel" }, h("div", { class: "row grow" }, qi, ss), isAdmin() ? h("button", { class: "btn primary", type: "button", onclick: () => productForm(null) }, "+ New product") : null), h("div", { class: "panel" }, box));
+};
+async function productForm(id) {
+  const existing = id ? await api("/admin/products/" + id) : null; const root = h("div"); const dyn = h("div"); const fv = {}; let images = existing ? existing.images.map((i) => ({ ...i })) : []; let variants = existing ? existing.variants.map((v) => ({ sku: v.sku, label: v.label, price: v.price_minor ? (v.price_minor / 100).toFixed(2) : "", stock: v.stock })) : [{ sku: "DEFAULT", label: "Standard", price: "", stock: 1 }];
+  const inp = (v = "", t = "text", extra = {}) => h("input", { type: t, value: v, ...extra });
+  const name = inp(existing ? existing.name : "", "text", { maxlength: 140 }), short = inp(existing ? existing.short_description : "", "text", { maxlength: 240 }), desc = h("textarea", { maxlength: 8000 }, existing ? existing.description : ""), price = inp(existing ? existing.price : "", "text", { inputmode: "decimal", placeholder: "49.99" }), disc = inp(existing ? existing.discount_percent : 0, "number", { min: 0, max: 90 }), sub = inp(existing ? existing.subcategory : "", "text", { maxlength: 60 }), deliv = inp(existing ? existing.delivery_info : "", "text", { maxlength: 500 }), refund = inp(existing ? existing.refund_policy : "", "text", { maxlength: 1000 }), tags = inp(existing ? (existing.tags || []).join(", ") : "", "text");
+  const country = h("select", null, st.countries.map((c) => h("option", { value: c.code, selected: existing && existing.country === c.code }, c.name))); const cat = h("select", null, st.cats.map((c) => h("option", { value: c.id, selected: existing && existing.category_id === c.id }, c.name)));
+  const feat = h("input", { type: "checkbox" }); if (existing && existing.featured) feat.checked = true; const statusSel = h("select", null, ["draft", "published"].map((x) => h("option", { value: x, selected: existing && existing.status === x }, x)));
+  const imgBox = h("div"), varBox = h("div"); const delBox = h("div"), delPrev = h("div", { class: "panel delprev" }); let delivery = ((existing && existing.delivery_fields) || []).map((d) => ({ ...d }));
+  const KINDS = [["text", "Text"], ["link", "Link (clickable)"], ["secret", "Secret (with copy button)"]];
+  const CARD_TEMPLATES = {
+    cards: [
+      ["CC Number", "secret"], ["Expiry (MM/YY)", "text"], ["CVV", "secret"], ["Name on card", "text"],
+      ["Address", "text"], ["Phone", "text"], ["Email", "text"], ["Extra info", "text"]
+    ],
+    dumps: [
+      ["Track 1", "secret"], ["Track 2", "secret"], ["PIN", "secret"], ["Name", "text"],
+      ["Address", "text"], ["Phone", "text"], ["Email", "text"], ["Extra info", "text"]
+    ]
+  };
+  const applyTemplate = (key) => {
+    const rows = CARD_TEMPLATES[key] || [];
+    delivery = rows.map(([label, kind]) => ({ label, value: "", kind }));
+    drawDelivery(); drawDelPrev();
+  };
+
+  const drawDelPrev = () => { clear(delPrev).append(h("div", { class: "small muted" }, "What the buyer will see after paying:")); const rows = delivery.filter((d) => d.label.trim() && d.value.trim()); if (!rows.length) delPrev.append(h("div", { class: "muted small" }, "Nothing yet - add at least one placeholder below.")); rows.forEach((d) => delPrev.append(h("div", { style: "margin-top:8px" }, h("strong", null, d.label), h("div", { style: "white-space:pre-wrap;overflow-wrap:anywhere" + (d.kind === "link" ? ";color:var(--accent)" : d.kind === "secret" ? ";font-family:monospace" : "") }, d.value)))); };
+  const drawDelivery = () => { clear(delBox); delivery.forEach((d, i) => { const lab = inp(d.label, "text", { placeholder: "Heading, e.g. Name", maxlength: 60 }); lab.addEventListener("input", () => { d.label = lab.value; drawDelPrev(); }); const val = h("textarea", { placeholder: "Content the buyer gets, e.g. gopal", maxlength: 4000, style: "min-height:56px" }, d.value); val.addEventListener("input", () => { d.value = val.value; drawDelPrev(); }); const kind = h("select", null, KINDS.map(([k, l]) => h("option", { value: k, selected: d.kind === k }, l))); kind.addEventListener("change", () => { d.kind = kind.value; drawDelPrev(); });
+      delBox.append(h("div", { class: "panel panel-raised" }, h("div", { class: "grid" }, field("Placeholder heading", lab), field("Type", kind)), field("Content", val), h("div", { class: "row" }, h("button", { class: "btn sm", type: "button", disabled: i === 0, onclick: () => { [delivery[i - 1], delivery[i]] = [delivery[i], delivery[i - 1]]; drawDelivery(); } }, "↑ Move up"), h("button", { class: "btn sm danger", type: "button", onclick: () => { delivery.splice(i, 1); drawDelivery(); } }, "Remove")))); }); drawDelPrev(); };
+  const addDel = (label = "", kind = "text") => { delivery.push({ label, value: "", kind }); drawDelivery(); };
+  const presets = h("div", { class: "row" },
+    h("button", { class: "btn sm primary", type: "button", onclick: () => applyTemplate("cards") }, "Cards template"),
+    h("button", { class: "btn sm primary", type: "button", onclick: () => applyTemplate("dumps") }, "Dumps template"),
+    [["+ Name", "Name", "text"], ["+ Download link", "Download link", "link"], ["+ Login / Password", "Login details", "secret"], ["+ Instructions", "Instructions", "text"], ["+ Custom", "", "text"]].map(([t, l, k]) => h("button", { class: "btn sm", type: "button", onclick: () => addDel(l, k) }, t)));
+  const drawImages = () => { clear(imgBox); images.forEach((im, i) => { const u = inp(im.url, "url", { placeholder: "https://i.ibb.co/…/photo.jpg" }); u.addEventListener("change", () => { im.url = u.value; drawImages(); }); const alt = inp(im.alt || "", "text", { placeholder: "Alt text", maxlength: 140 }); alt.addEventListener("input", () => (im.alt = alt.value)); imgBox.append(h("div", { class: "row" }, h("div", { class: "grow" }, u), h("div", { class: "grow" }, alt), h("button", { class: "btn sm", type: "button", disabled: i === 0, onclick: () => { [images[i - 1], images[i]] = [images[i], images[i - 1]]; drawImages(); } }, "↑"), h("button", { class: "btn sm danger", type: "button", onclick: () => { images.splice(i, 1); drawImages(); } }, "✕")), im.url ? h("div", { class: "prev" }, h("img", { src: im.url, alt: im.alt || "preview", onerror: (e) => { e.target.alt = "Image failed to load"; } })) : null); }); imgBox.append(h("button", { class: "btn sm", type: "button", onclick: () => { images.push({ url: "", alt: "" }); drawImages(); } }, "+ Add image URL"), " ", h("label", { class: "btn sm", style: "display:inline-block;cursor:pointer" }, "Upload to ImgBB", h("input", { type: "file", accept: "image/*", class: "hide", onchange: go(async (e) => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append("file", f); const hd = { Authorization: "Bearer " + st.token }; const r = await fetch(st.base + "/api/admin/uploads", { method: "POST", headers: hd, body: fd }); const d = await r.json(); if (!r.ok) throw new Error(d.error || "Upload failed"); images.push({ url: d.url, alt: "" }); drawImages(); toast("Uploaded.", "ok"); }) }))); };
+  const drawVariants = () => { clear(varBox); variants.forEach((v, i) => { const mk = (k, ph, t = "text") => { const x = inp(v[k], t, { placeholder: ph }); x.addEventListener("input", () => (v[k] = t === "number" ? Number(x.value) : x.value)); return x; }; const stockIn = mk("stock", "Initial stock", "number"); if (existing && existing.variants.some((o) => o.sku === v.sku)) { stockIn.disabled = true; stockIn.title = "Change stock from the Inventory page"; } varBox.append(h("div", { class: "row" }, h("div", { class: "grow" }, mk("sku", "SKU")), h("div", { class: "grow" }, mk("label", "Label")), h("div", { class: "grow" }, mk("price", "Override price")), h("div", { class: "grow" }, stockIn), variants.length > 1 ? h("button", { class: "btn sm danger", type: "button", onclick: () => { variants.splice(i, 1); drawVariants(); } }, "✕") : null)); }); varBox.append(h("button", { class: "btn sm", type: "button", onclick: () => { variants.push({ sku: "SKU" + (variants.length + 1), label: "", price: "", stock: 0 }); drawVariants(); } }, "+ Add variant")); };
+  async function drawDynamic() {
+    const s = await api("/admin/schemas/effective?category_id=" + cat.value); clear(dyn); if (!s.fields.length) dyn.append(h("p", { class: "muted small" }, "No custom fields for this category. Define them under “Product fields”."));
+    s.fields.forEach((fd) => { const cur = existing && existing.fields ? existing.fields[fd.key] : fd.default; let el, get; const t = fd.type;
+      if (["text", "variant", "region"].includes(t)) { el = inp(cur ?? "", "text", { placeholder: fd.placeholder }); get = () => el.value; }
+      else if (t === "textarea") { el = h("textarea", { placeholder: fd.placeholder }, cur ?? ""); get = () => el.value; }
+      else if (["number", "stock"].includes(t)) { el = inp(cur ?? "", "number", { step: t === "stock" ? 1 : "any", min: fd.min ?? (t === "stock" ? 0 : undefined), max: fd.max ?? undefined, placeholder: fd.placeholder }); get = () => (el.value === "" ? null : Number(el.value)); }
+      else if (t === "decimal") { el = h("div", { class: "row" }, h("span", { class: "chip" }, "USD"), inp(cur ?? "", "text", { inputmode: "decimal", placeholder: fd.placeholder || "0.00" })); get = () => el.lastChild.value || null; }
+      else if (t === "country") { el = h("select", null, h("option", { value: "" }, "—"), st.countries.map((c) => h("option", { value: c.code, selected: cur === c.code }, c.name))); get = () => el.value || null; }
+      else if (t === "dropdown") { el = h("select", null, h("option", { value: "" }, "—"), fd.options.map((o) => h("option", { value: o, selected: cur === o }, o))); get = () => el.value || null; }
+      else if (t === "multiselect") { el = h("div", { class: "row" }, fd.options.map((o) => h("label", { class: "row", style: "margin:0" }, h("input", { type: "checkbox", value: o, checked: Array.isArray(cur) && cur.includes(o) }), o))); get = () => [...el.querySelectorAll("input:checked")].map((x) => x.value); }
+      else if (t === "boolean") { el = h("input", { type: "checkbox", checked: cur === true }); get = () => el.checked; }
+      else if (t === "date") { el = inp(cur ?? "", "date"); get = () => el.value || null; }
+      else if (t === "url") { el = inp(cur ?? "", "url", { placeholder: "https://" }); get = () => el.value || null; }
+      else if (t === "image_url") { const u = inp(cur ?? "", "url", { placeholder: "https://i.ibb.co/…" }); const pv = h("div", { class: "prev" }); const draw = () => { clear(pv); if (u.value) pv.append(h("img", { src: u.value, alt: "preview", onerror: (e) => (e.target.alt = "Failed to load") })); }; u.addEventListener("change", draw); draw(); el = h("div", null, u, pv); get = () => u.value || null; }
+      else if (t === "metadata") { el = h("textarea", { placeholder: "key=value per line" }, cur ? Object.entries(cur).map(([k, v]) => `${k}=${v}`).join("\n") : ""); get = () => { const o = {}; el.value.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) o[l.slice(0, i).trim()] = l.slice(i + 1).trim(); }); return Object.keys(o).length ? o : null; }; }
+      fv[fd.key] = get; dyn.append(field(fd.label + (fd.required ? " *" : ""), el, fd.help_text)); });
+  }
+  cat.addEventListener("change", go(drawDynamic)); drawImages(); drawVariants(); drawDelivery(); await drawDynamic();
+  const collect = () => { const fields = {}; for (const [k, g] of Object.entries(fv)) { const v = g(); if (v !== null && v !== "" && !(Array.isArray(v) && !v.length)) fields[k] = v; } return { name: name.value, short_description: short.value, description: desc.value, price: price.value, discount_percent: Number(disc.value || 0), country: country.value, category_id: cat.value, subcategory: sub.value, images: images.filter((i) => i.url), variants: variants.map((v) => ({ sku: v.sku, label: v.label, price: v.price || null, stock: Number(v.stock || 0) })), fields, tags: tags.value.split(",").map((t) => t.trim()).filter(Boolean), featured: feat.checked, status: statusSel.value, delivery_info: deliv.value, refund_policy: refund.value, delivery: delivery.filter((d) => d.label.trim() && d.value.trim()).map((d) => ({ label: d.label.trim(), value: d.value.trim(), kind: d.kind || "text" })) }; };
+  const preview = () => { const b = collect(); const p = h("div", { class: "panel" }, h("h3", null, b.name || "(untitled)"), h("p", { class: "muted small" }, `${country.selectedOptions[0].text} · ${cat.selectedOptions[0].text}`), b.images[0] ? h("img", { src: b.images[0].url, alt: "", style: "max-width:100%;border-radius:10px" }) : null, h("p", null, b.short_description), h("div", { class: "stat" }, "$" + b.price, b.discount_percent ? h("span", { class: "chip warn" }, "-" + b.discount_percent + "%") : null), h("p", { style: "white-space:pre-wrap" }, b.description), b.delivery.length ? h("div", { class: "panel" }, h("h3", null, "Buyer receives after payment"), b.delivery.map((d) => h("div", { style: "margin-top:6px" }, h("strong", null, d.label), h("div", { style: "white-space:pre-wrap" }, d.value)))) : null, h("div", null, Object.entries(b.fields).map(([k, v]) => h("div", { class: "small" }, h("strong", null, k + ": "), typeof v === "object" ? JSON.stringify(v) : String(v)))), h("p", { class: "hint" }, "Preview only. The storefront renders validated server data.")); modal("Preview", p); };
+  const err = h("div", { class: "err", role: "alert" });
+  root.append(h("div", { class: "grid" }, field("Name *", name), field("Price (USD) *", price, "Decimal with at most 2 places"), field("Discount %", disc), field("Country *", country), field("Category *", cat), field("Subcategory", sub),  field("Status", statusSel), field("Tags", tags, "Comma separated")), field("Short description", short), field("Description", desc), field("Delivery note (public, shown on the product page)", deliv), field("Refund policy", refund), h("label", { class: "row" }, feat, "Featured / recommended"),
+    h("h3", null, "1 · Listing details"), h("h3", null, "Images (ImgBB or allow-listed hosts)"), imgBox, h("h3", null, "Variants & initial stock"), varBox, h("h3", null, "Category fields"), dyn, h("hr"), h("h3", null, "2 · What does the buyer receive after paying?"), h("p", { class: "muted small" }, "Each placeholder becomes a bold heading with your content under it on the buyer's order page - only after the payment is verified. Example: heading Name, content gopal."), presets, delBox, delPrev, err,
+    h("div", { class: "row" }, h("button", { class: "btn", type: "button", onclick: go(async () => preview()) }, "Preview"), h("button", { class: "btn primary", type: "button", onclick: async () => { err.textContent = ""; try { const body = collect(); if (id) await api("/admin/products/" + id, { method: "PUT", body }); else await api("/admin/products", { method: "POST", body }); $("#dlg").close(); toast("Product saved.", "ok"); show("products"); } catch (x) { err.textContent = x.message; } } }, "Save")));
+  modal(id ? "Edit product" : "New product", root);
+}
+
+/* schema builder */
+const FT = ["text", "textarea", "number", "decimal", "country", "region", "dropdown", "multiselect", "boolean", "date", "url", "image_url", "stock", "variant", "metadata"];
+VIEWS.fields = async () => {
+  const sel = h("select", null, h("option", { value: "" }, "Global (all categories)"), st.cats.map((c) => h("option", { value: c.id }, c.name))); const box = h("div"); let fields = [];
+  const num = (v) => (v === "" ? null : Number(v));
+  async function load() { const all = await api("/admin/schemas"); const cur = all.schemas.find((s) => (s.category_id || "") === sel.value); fields = cur ? cur.fields.map((f) => ({ ...f })) : []; draw(); }
+  function draw() { clear(box); fields.forEach((f, i) => { const b = (k, p, t = "text") => { const x = h("input", { type: t, value: f[k] ?? "", placeholder: p }); x.addEventListener("input", () => (f[k] = t === "number" ? num(x.value) : x.value)); return x; }; const cb = (k, l) => { const x = h("input", { type: "checkbox", checked: !!f[k] }); x.addEventListener("change", () => (f[k] = x.checked)); return h("label", { class: "row", style: "margin:0" }, x, l); }; const ty = h("select", null, FT.map((t) => h("option", { value: t, selected: f.type === t }, t))); ty.addEventListener("change", () => { f.type = ty.value; draw(); });
+    const opts = h("input", { value: (f.options || []).join(", "), placeholder: "Option A, Option B" }); opts.addEventListener("input", () => (f.options = opts.value.split(",").map((s) => s.trim()).filter(Boolean)));
+    box.append(h("div", { class: "panel" }, h("div", { class: "grid" }, field("Label", b("label", "Display label")), field("Key", b("key", "internal_key", "text")), field("Type", ty), field("Position", b("position", "0", "number")), field("Placeholder", b("placeholder", "")), field("Help text", b("help_text", "")), field("Min", b("min", "", "number")), field("Max", b("max", "", "number")), ["dropdown", "multiselect"].includes(f.type) ? field("Options", opts) : null, field("Default", b("default", ""))), h("div", { class: "row" }, cb("required", "Required"), cb("public", "Public"), cb("searchable", "Searchable"), cb("filterable", "Filterable"), cb("sortable", "Sortable"), cb("show_on_card", "Show on card"), h("button", { class: "btn sm danger", type: "button", onclick: () => { fields.splice(i, 1); draw(); } }, "Remove")))); });
+    box.append(h("div", { class: "row" }, h("button", { class: "btn", type: "button", onclick: () => { fields.push({ key: "", label: "", type: "text", required: false, public: true, searchable: false, filterable: false, sortable: false, show_on_card: false, position: fields.length, options: [], placeholder: "", help_text: "" }); draw(); } }, "+ Add field"), h("button", { class: "btn primary", type: "button", onclick: go(async () => { await api("/admin/schemas", { method: "PUT", body: { category_id: sel.value || null, name: "Template", fields: fields.map((f) => ({ ...f, position: Number(f.position || 0), options: f.options || [] })), active: true } }); toast("Fields saved. Product forms update immediately.", "ok"); }) }, "Save fields"))); }
+  sel.addEventListener("change", go(load)); await load(); return h("div", null, h("p", { class: "muted small" }, "Fields apply to the chosen category (and add to the global set). Product forms and storefront filters update automatically."), h("div", { class: "panel" }, field("Template for", sel)), box);
+};
+
+VIEWS.categories = async () => {
+  const r = await api("/admin/categories"); st.cats = r.categories; const box = h("div");
+  const edit = (c) => { const n = h("input", { value: c ? c.name : "" }), d = h("input", { value: c ? c.description : "" }), en = h("input", { type: "checkbox", checked: c ? c.enabled : true }), ft = h("input", { type: "checkbox", checked: c ? c.featured : false }); const par = h("select", null, h("option", { value: "" }, "— top level —"), st.cats.filter((x) => !c || x.id !== c.id).map((x) => h("option", { value: x.id, selected: c && c.parent_id === x.id }, x.name))); const e2 = h("div", { class: "err" });
+    modal(c ? "Edit category" : "New category", h("div", null, field("Name", n), field("Parent", par), field("Description", d), h("label", { class: "row" }, en, "Enabled"), h("label", { class: "row" }, ft, "Featured"), e2, h("button", { class: "btn primary", type: "button", onclick: async () => { try { const body = { name: n.value, parent_id: par.value || null, description: d.value, enabled: en.checked, featured: ft.checked }; if (c) await api("/admin/categories/" + c.id, { method: "PUT", body }); else await api("/admin/categories", { method: "POST", body }); $("#dlg").close(); show("categories"); } catch (x) { e2.textContent = x.message; } } }, "Save"))); };
+  const move = go(async (i, dir) => { const ids = st.cats.map((c) => c.id); const j = i + dir; if (j < 0 || j >= ids.length) return; [ids[i], ids[j]] = [ids[j], ids[i]]; await api("/admin/categories/reorder", { method: "POST", body: { ids } }); show("categories"); });
+  box.append(table(["Name", "Parent", "Enabled", ""], st.cats.map((c, i) => h("tr", null, h("td", null, c.name), h("td", null, (st.cats.find((p) => p.id === c.parent_id) || {}).name || "—"), h("td", null, chip(c.enabled ? "active" : "disabled")), h("td", null, h("div", { class: "row" }, h("button", { class: "btn sm", type: "button", onclick: () => move(i, -1) }, "↑"), h("button", { class: "btn sm", type: "button", onclick: () => move(i, 1) }, "↓"), isAdmin() ? h("button", { class: "btn sm", type: "button", onclick: () => edit(c) }, "Edit") : null))))));
+  return h("div", null, isAdmin() ? h("div", { class: "panel" }, h("button", { class: "btn primary", type: "button", onclick: () => edit(null) }, "+ New category")) : null, h("div", { class: "panel" }, box));
+};
+VIEWS.countries = async () => {
+  const r = await api("/admin/countries"); st.countries = r.countries;
+  const code = h("input", { maxlength: 2, placeholder: "US", style: "text-transform:uppercase;width:70px" });
+  const nm = h("input", { placeholder: "United States" });
+  const flag = h("input", { type: "url", placeholder: "Flag image URL (ImgBB)" });
+  return h("div", null,
+    isAdmin() ? h("div", { class: "panel row" }, code, nm, flag, h("button", { class: "btn primary", type: "button", onclick: go(async () => { await api("/admin/countries", { method: "PUT", body: { code: code.value, name: nm.value, region: "", enabled: true, order: 0, flag_url: flag.value || null } }); show("countries"); }) }, "Add / update")) : null,
+    h("div", { class: "panel" }, table(["Flag", "Code", "Name", "Enabled", ""], r.countries.map((c) => h("tr", null,
+      h("td", null, c.flag_url ? h("img", { src: c.flag_url, alt: c.code, style: "width:28px;height:18px;object-fit:cover;border-radius:3px" }) : "—"),
+      h("td", null, c.code), h("td", null, c.name), h("td", null, chip(c.enabled ? "active" : "disabled")),
+      h("td", null, isAdmin() ? h("div", { class: "row" },
+        h("button", { class: "btn sm", type: "button", onclick: go(async () => { const fu = prompt("Flag image URL (ImgBB)", c.flag_url || ""); await api("/admin/countries", { method: "PUT", body: { code: c.code, name: c.name, region: c.region || "", enabled: c.enabled, order: c.order || 0, flag_url: fu || null } }); show("countries"); }) }, "Flag"),
+        h("button", { class: "btn sm", type: "button", onclick: go(async () => { await api("/admin/countries", { method: "PUT", body: { code: c.code, name: c.name, region: c.region || "", enabled: !c.enabled, order: c.order || 0, flag_url: c.flag_url || null } }); show("countries"); }) }, c.enabled ? "Disable" : "Enable")
+      ) : null)))));
+};
+
+VIEWS.inventory = async () => {
+  const r = await api("/admin/inventory");
+  const adjust = (row) => { const d = h("input", { type: "number", placeholder: "+10 or -3" }), to = h("input", { type: "number", min: 0, placeholder: "Set exact stock" }), why = h("input", { placeholder: "Reason (required)" }), e = h("div", { class: "err" }); modal(`Adjust ${row.sku}`, h("div", null, h("p", { class: "muted small" }, `${row.name} — stock ${row.stock}`), field("Change by", d), field("…or set to", to), field("Reason", why), e, h("button", { class: "btn primary", type: "button", onclick: async () => { try { const body = { product_id: row.product_id, sku: row.sku, reason: why.value }; if (d.value !== "") body.delta = Number(d.value); else if (to.value !== "") body.set_to = Number(to.value); await api("/admin/inventory/adjust", { method: "POST", body }); $("#dlg").close(); show("inventory"); } catch (x) { e.textContent = x.message; } } }, "Apply"))); };
+  const csvIn = h("input", { type: "file", accept: ".csv" });
+  const importCsv = go(async () => { const f = csvIn.files[0]; if (!f) throw new Error("Choose a CSV exported from this page."); const lines = (await f.text()).split(/\r?\n/).slice(1).filter(Boolean); const rows = lines.map((l) => { const c = l.split(","); return { product_id: c[0], sku: c[2], stock: Number(c[3]) }; }); const why = prompt("Reason for this import (audited):"); if (!why) return; const res = await api("/admin/inventory/import", { method: "POST", body: { rows, reason: why } }); toast(`Applied ${res.applied} row(s), ${res.errors.length} error(s).`, res.errors.length ? "bad" : "ok"); show("inventory"); });
+  const exportCsv = go(async () => { const res = await api("/admin/inventory/export", { raw: true }); const b = await res.blob(); const a = h("a", { href: URL.createObjectURL(b), download: "inventory.csv" }); document.body.append(a); a.click(); a.remove(); });
+  return h("div", null, h("div", { class: "panel row" }, isAdmin() ? h("button", { class: "btn", type: "button", onclick: exportCsv }, "Export CSV") : null, isAdmin() ? [csvIn, h("button", { class: "btn", type: "button", onclick: importCsv }, "Import CSV")] : null), h("div", { class: "panel" }, table(["Product", "SKU", "In stock", "Sold", ""], r.rows.map((x) => h("tr", null, h("td", null, x.name), h("td", null, x.sku, " ", h("span", { class: "muted" }, x.label)), h("td", null, x.available <= 0 ? chip("failed") : x.available <= x.low_stock_threshold ? chip("pending") : null, " ", x.available), h("td", null, x.sold), h("td", null, isAdmin() ? h("button", { class: "btn sm", type: "button", onclick: () => adjust(x) }, "Adjust") : null))))));
+};
+
+VIEWS.orders = async () => {
+  const q = h("input", { placeholder: "Order number (ORD-…)" }), ss = h("select", null, ["", "created", "pending", "paid", "failed", "expired", "cancelled", "refunded"].map((x) => h("option", { value: x }, x || "All"))); const box = h("div");
+  async function load() { const r = await api(`/admin/orders?q=${encodeURIComponent(q.value)}&status=${ss.value}`); clear(box).append(table(["Order", "Status", "Fulfilment", "Total", "Method", "Created", ""], r.orders.map((o) => h("tr", null, h("td", null, o.number), h("td", null, chip(o.status)), h("td", null, chip(o.fulfillment_status || "")), h("td", null, money(o.total_minor, o.currency)), h("td", null, o.payment_method), h("td", null, when(o.created_at)), h("td", null, h("button", { class: "btn sm", type: "button", onclick: () => detail(o.number) }, "Open")))))); }
+  async function detail(n) { const d = await api("/admin/orders/" + n); const o = d.order; const ful = h("select", null, ["unfulfilled", "processing", "shipped", "delivered"].map((x) => h("option", { value: x, selected: o.fulfillment_status === x }, x)));
+    modal(o.number, h("div", null, h("p", null, chip(o.status), " ", d.customer ? d.customer.email : ""), table(["Item", "Qty", "Total"], o.items.map((i) => h("tr", null, h("td", null, i.name + " (" + i.variant_label + ")"), h("td", null, i.qty), h("td", null, money(i.line_total_minor, o.currency))))), h("p", null, "Total: ", h("strong", null, money(o.total_minor, o.currency)), o.refund_total_minor ? ` · Refunded ${money(o.refund_total_minor, o.currency)}` : ""), d.payment && d.payment.status ? h("p", { class: "small" }, `Payment: ${d.payment.provider} · ${d.payment.status} · verification ${d.payment.verification && d.payment.verification.ok ? "ok" : "pending/failed"}`) : null, d.support_tickets.length ? h("p", { class: "small" }, "Support tickets: " + d.support_tickets.length) : null, o.deliveries && o.deliveries.length ? h("div", null, h("h3", null, "Delivered to buyer"), o.deliveries.map((dl) => h("div", { class: "small" }, h("em", null, dl.name), dl.fields.map((f) => h("div", null, h("strong", null, f.label + ": "), f.value))))) : null, h("h3", null, "History"), o.history.map((x) => h("div", { class: "small" }, when(x.at) + " — " + x.status)),
+      isAdmin() && o.status === "paid" ? h("div", { class: "row" }, ful, h("button", { class: "btn", type: "button", onclick: go(async () => { await api(`/admin/orders/${n}/fulfillment`, { method: "POST", body: { fulfillment_status: ful.value } }); toast("Updated.", "ok"); $("#dlg").close(); load(); }) }, "Set fulfilment"), h("button", { class: "btn danger", type: "button", onclick: go(async () => { const why = prompt("Refund reason (credited to the customer's wallet):"); if (!why) return; if (!(await confirmBox("Refund the full order to the customer's wallet? This cannot be undone."))) return; await api(`/admin/orders/${n}/refund`, { method: "POST", body: { reason: why, restock: false } }); toast("Refunded to wallet.", "ok"); load(); }) }, "Refund to wallet")) : null, h("p", { class: "hint" }, "Payments cannot be marked as paid manually; they are verified directly with the provider."))); }
+  q.addEventListener("input", () => { clearTimeout(q._t); q._t = setTimeout(go(load), 300); }); ss.addEventListener("change", go(load)); await load(); return h("div", null, h("div", { class: "panel row" }, q, ss), h("div", { class: "panel" }, box));
+};
+VIEWS.payments = async () => {
+  const r = await api("/admin/payments");
+  return h("div", null, isAdmin() ? h("div", { class: "panel row" }, h("button", { class: "btn primary", type: "button", onclick: go(async () => { const x = await api("/admin/payments/reconcile", { method: "POST" }); toast(`Checked ${x.checked}; newly paid ${x.newly_paid}.`, "ok"); show("payments"); }) }, "Re-verify pending payments with provider"), h("span", { class: "muted small" }, "Reconciliation queries the provider; it never accepts manual proof.")) : null,
+    h("div", { class: "panel" }, table(["Provider", "Order ref", "Invoice", "Expected", "Verified", "Status", "Verification", "Reconciliation", "Created"], r.payments.map((p) => h("tr", null, h("td", null, p.provider, p.sandbox ? " (sandbox)" : ""), h("td", null, p.reference), h("td", null, p.invoice_ref), h("td", null, money(p.expected_minor, p.currency)), h("td", null, p.verified_minor != null ? money(p.verified_minor, p.currency) : "—"), h("td", null, chip(p.status)), h("td", null, p.verification), h("td", null, chip(p.reconciliation)), h("td", null, when(p.created_at)))))));
+};
+VIEWS.users = async () => {
+  const q = h("input", { placeholder: "Email starts with…" }), box = h("div");
+  async function load() { const r = await api("/admin/users?q=" + encodeURIComponent(q.value)); clear(box).append(table(["Email", "Role", "Status", "Tier", "Spend", "Points", "Referrals", ""], r.users.map((u) => h("tr", null, h("td", null, u.email), h("td", null, u.role), h("td", null, chip(u.status)), h("td", null, u.tier), h("td", null, money(u.lifetime_spend_minor)), h("td", null, u.points_balance), h("td", null, u.referrals), h("td", null, isAdmin() && u.role === "customer" ? h("div", { class: "row" }, h("button", { class: "btn sm", type: "button", onclick: go(async () => { const why = prompt(u.status === "active" ? "Reason for suspension:" : "Reason for reactivation:"); if (!why) return; await api(`/admin/users/${u.id}/status`, { method: "POST", body: { status: u.status === "active" ? "suspended" : "active", reason: why } }); load(); }) }, u.status === "active" ? "Suspend" : "Reactivate"), h("button", { class: "btn sm", type: "button", onclick: go(async () => { const x = await api(`/admin/users/${u.id}/revoke-sessions`, { method: "POST" }); toast(`Revoked ${x.revoked} session(s).`, "ok"); }) }, "Revoke sessions"), h("button", { class: "btn sm", type: "button", onclick: go(async () => { const x = await api(`/admin/users/${u.id}/reset-link`, { method: "POST" }); modal("Password reset link", h("div", null, h("p", { class: "small muted" }, `Single use, expires in ${x.expires_in_minutes} minutes. Send it to the customer securely.`), h("textarea", { readonly: true }, x.reset_url))); }) }, "Reset link"), h("button", { class: "btn sm", type: "button", onclick: go(async () => { const x = await api(`/admin/users/${u.id}/rewards`); modal("Reward history", table(["When", "Type", "Points", "Order"], x.ledger.map((l) => h("tr", null, h("td", null, when(l.at)), h("td", null, l.type), h("td", null, l.points), h("td", null, l.order_number || ""))))); }) }, "Rewards")) : null))))); }
+  q.addEventListener("input", () => { clearTimeout(q._t); q._t = setTimeout(go(load), 300); }); await load(); return h("div", null, h("div", { class: "panel" }, q), h("div", { class: "panel" }, box));
+};
+VIEWS.invites = async () => {
+  const r = await api("/admin/invitations"); const em = h("input", { type: "email", placeholder: "email@example.com" });
+  const show2 = (x) => modal("Invitation code", h("div", null, h("p", { class: "small muted" }, x.note || "Shown once. Send it to the applicant securely."), h("input", { readonly: true, value: x.invite_code })));
+  return h("div", null, isAdmin() ? h("div", { class: "panel row" }, em, h("button", { class: "btn primary", type: "button", onclick: go(async () => { show2(await api("/admin/invitations", { method: "POST", body: { email: em.value } })); }) }, "Create invitation")) : null, h("div", { class: "panel" }, table(["Email", "Name", "Message", "Status", ""], r.invitations.map((i) => h("tr", null, h("td", null, i.email), h("td", null, i.name || ""), h("td", null, i.message || ""), h("td", null, chip(i.status)), h("td", null, isAdmin() && i.status !== "used" ? h("div", { class: "row" }, h("button", { class: "btn sm", type: "button", onclick: go(async () => { show2(await api(`/admin/invitations/${i.id}/approve`, { method: "POST" })); show("invites"); }) }, "Approve"), h("button", { class: "btn sm danger", type: "button", onclick: go(async () => { await api(`/admin/invitations/${i.id}/reject`, { method: "POST" }); show("invites"); }) }, "Reject")) : null))))));
+};
+VIEWS.tiers = async () => {
+  const r = await api("/admin/tiers"); const row = (t) => { const mk = (k, t2 = "number") => { const x = h("input", { type: t2, value: t ? t[k] : "" }); return x; }; const k = mk("key", "text"), n = mk("name", "text"), th = mk("threshold_minor"), dc = mk("discount_bps"), rm = mk("reward_multiplier_bps"), bf = h("input", { value: t ? (t.benefits || []).join("; ") : "" }), ord = mk("order"); modal(t ? "Edit tier" : "New tier", h("div", null, field("Key", k), field("Name", n), field("Spend threshold (minor units, 100 = 1.00)", th), field("Discount (basis points, 100 = 1%)", dc), field("Reward multiplier (bps, 10000 = 1x)", rm), field("Benefits (;-separated)", bf), field("Order", ord), h("button", { class: "btn primary", type: "button", onclick: go(async () => { await api("/admin/tiers", { method: "PUT", body: { key: k.value, name: n.value, threshold_minor: Number(th.value), discount_bps: Number(dc.value), reward_multiplier_bps: Number(rm.value), benefits: bf.value.split(";").map((s) => s.trim()).filter(Boolean), order: Number(ord.value || 0), active: true } }); $("#dlg").close(); show("tiers"); }) }, "Save"))); };
+  return h("div", null, isAdmin() ? h("div", { class: "panel" }, h("button", { class: "btn primary", type: "button", onclick: () => row(null) }, "+ New tier")) : null, h("div", { class: "panel" }, table(["Tier", "Threshold", "Discount", "Reward x", "Benefits", ""], r.tiers.map((t) => h("tr", null, h("td", null, t.name), h("td", null, money(t.threshold_minor)), h("td", null, (t.discount_bps / 100) + "%"), h("td", null, t.reward_multiplier_bps / 10000), h("td", null, (t.benefits || []).join(", ")), h("td", null, isAdmin() ? h("button", { class: "btn sm", type: "button", onclick: () => row(t) }, "Edit") : null))))));
+};
+VIEWS.tickets = async () => {
+  const r = await api("/admin/tickets"); return h("div", null, r.tickets.length ? r.tickets.map((t) => { const reply = h("input", { placeholder: "Reply…" }); return h("div", { class: "panel" }, h("div", { class: "row between" }, h("strong", null, t.subject), h("span", null, chip(t.status), " ", t.email || "", t.order_number ? " · " + t.order_number : "")), t.messages.map((m) => h("div", { class: "small" }, h("strong", null, m.from), " " + when(m.at), h("div", { style: "white-space:pre-wrap" }, m.body))), h("div", { class: "row" }, h("div", { class: "grow" }, reply), h("button", { class: "btn sm", type: "button", onclick: go(async () => { if (!reply.value) return; await api(`/admin/tickets/${t.id}/reply`, { method: "POST", body: { message: reply.value } }); show("tickets"); }) }, "Send"), h("button", { class: "btn sm", type: "button", onclick: go(async () => { await api(`/admin/tickets/${t.id}/status`, { method: "POST", body: { status: t.status === "closed" ? "open" : "closed" } }); show("tickets"); }) }, t.status === "closed" ? "Reopen" : "Close"))); }) : h("div", { class: "panel muted" }, "No tickets."));
+};
+VIEWS.reviews = async () => { const r = await api("/admin/reviews"); return h("div", { class: "panel" }, table(["Rating", "Title", "Body", "Status", ""], r.reviews.map((v) => h("tr", null, h("td", null, v.rating), h("td", null, v.title), h("td", null, v.body), h("td", null, chip(v.status)), h("td", null, isAdmin() && v.status === "published" ? h("button", { class: "btn sm danger", type: "button", onclick: go(async () => { if (await confirmBox("Hide this review?")) { await api(`/admin/reviews/${v.id}/hide`, { method: "POST" }); show("reviews"); } }) }, "Hide") : null))))); };
+VIEWS.settings = async () => {
+  const r = (await api("/admin/settings")).settings; const keys = [["brand_name", "Brand name"], ["tagline", "Tagline"], ["hero_title", "Hero title"], ["hero_subtitle", "Hero subtitle"], ["support_url", "Support URL (https)"], ["support_email", "Support email"], ["terms_url", "Terms URL (https)"], ["tax_rate_bps", "Tax rate (basis points, 1000 = 10%)"], ["points_per_unit", "Reward points per 1.00 spent"]]; const ins = {};
+  const inv = h("input", { type: "checkbox", checked: !!r.invite_only });
+  const plisioKey = h("input", { type: "password", value: r.plisio_api_key || "", placeholder: r.plisio_api_key_set ? "•••••••• (leave blank to keep)" : "Paste Plisio API key", autocomplete: "off" });
+  const plisioSand = h("input", { type: "checkbox", checked: !!r.plisio_sandbox });
+  const mcLogo = h("input", { type: "url", value: r.mastercard_logo_url || "", placeholder: "https://i.ibb.co/.../mastercard.png" });
+  const visaLogo = h("input", { type: "url", value: r.visa_logo_url || "", placeholder: "https://i.ibb.co/.../visa.png" });
+  return h("div", null,
+    h("div", { class: "panel" }, h("h3", null, "Storefront"), keys.map(([k, l]) => { ins[k] = h("input", { value: r[k] ?? "" }); return field(l, ins[k]); }), h("label", { class: "row" }, inv, "Invitation-only registration")),
+    h("div", { class: "panel" }, h("h3", null, "Plisio payments"), h("p", { class: "muted small" }, "Change the API key any time — the wallet/merchant on Plisio switches immediately for new invoices."), field("Plisio API key", plisioKey), h("label", { class: "row" }, plisioSand, "Sandbox mode"), field("Mastercard logo URL (ImgBB)", mcLogo), field("Visa logo URL (ImgBB)", visaLogo)),
+    isAdmin() ? h("button", { class: "btn primary", type: "button", onclick: go(async () => { const body = { invite_only: inv.checked, plisio_sandbox: plisioSand.checked }; for (const [k] of keys) { const v = ins[k].value.trim(); if (["tax_rate_bps", "points_per_unit"].includes(k)) { if (v !== "") body[k] = Number(v); } else if (v !== "") body[k] = v; } const pk = plisioKey.value.trim(); if (pk && pk !== "********") body.plisio_api_key = pk; if (mcLogo.value.trim()) body.mastercard_logo_url = mcLogo.value.trim(); if (visaLogo.value.trim()) body.visa_logo_url = visaLogo.value.trim(); await api("/admin/settings", { method: "PUT", body }); toast("Settings saved.", "ok"); show("settings"); }) }, "Save settings") : null);
+};
+
+/* resume session after reload */
+st.base = SS.get("base") || ""; loadCap();
+(async () => { const t = SS.get("tok"); if (!t) return; st.base = SS.get("base") || ""; st.token = t; try { const r = await api("/auth/me"); st.user = r.user; st.csrf = r.csrf; await start(); } catch { signedOut(); } })();
+})();
+</script>
+</body>
+</html>
