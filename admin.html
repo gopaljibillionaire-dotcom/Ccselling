@@ -616,15 +616,30 @@ VIEWS.countries = async () => {
   const code = h("input", { maxlength: 2, placeholder: "US", style: "text-transform:uppercase;width:70px" });
   const nm = h("input", { placeholder: "United States" });
   const flag = h("input", { type: "url", placeholder: "Flag image URL (ImgBB)" });
+  const rows = r.countries.map((c) => h("tr", null,
+    h("td", null, c.flag_url ? h("img", { src: c.flag_url, alt: c.code, style: "width:28px;height:18px;object-fit:cover;border-radius:3px" }) : "—"),
+    h("td", null, c.code),
+    h("td", null, c.name),
+    h("td", null, chip(c.enabled ? "active" : "disabled")),
+    h("td", null, isAdmin() ? h("div", { class: "row" },
+      h("button", { class: "btn sm", type: "button", onclick: go(async () => {
+        const fu = prompt("Flag image URL (ImgBB)", c.flag_url || "");
+        await api("/admin/countries", { method: "PUT", body: { code: c.code, name: c.name, region: c.region || "", enabled: c.enabled, order: c.order || 0, flag_url: fu || null } });
+        show("countries");
+      }) }, "Flag"),
+      h("button", { class: "btn sm", type: "button", onclick: go(async () => {
+        await api("/admin/countries", { method: "PUT", body: { code: c.code, name: c.name, region: c.region || "", enabled: !c.enabled, order: c.order || 0, flag_url: c.flag_url || null } });
+        show("countries");
+      }) }, c.enabled ? "Disable" : "Enable")
+    ) : null)
+  ));
   return h("div", null,
-    isAdmin() ? h("div", { class: "panel row" }, code, nm, flag, h("button", { class: "btn primary", type: "button", onclick: go(async () => { await api("/admin/countries", { method: "PUT", body: { code: code.value, name: nm.value, region: "", enabled: true, order: 0, flag_url: flag.value || null } }); show("countries"); }) }, "Add / update")) : null,
-    h("div", { class: "panel" }, table(["Flag", "Code", "Name", "Enabled", ""], r.countries.map((c) => h("tr", null,
-      h("td", null, c.flag_url ? h("img", { src: c.flag_url, alt: c.code, style: "width:28px;height:18px;object-fit:cover;border-radius:3px" }) : "—"),
-      h("td", null, c.code), h("td", null, c.name), h("td", null, chip(c.enabled ? "active" : "disabled")),
-      h("td", null, isAdmin() ? h("div", { class: "row" },
-        h("button", { class: "btn sm", type: "button", onclick: go(async () => { const fu = prompt("Flag image URL (ImgBB)", c.flag_url || ""); await api("/admin/countries", { method: "PUT", body: { code: c.code, name: c.name, region: c.region || "", enabled: c.enabled, order: c.order || 0, flag_url: fu || null } }); show("countries"); }) }, "Flag"),
-        h("button", { class: "btn sm", type: "button", onclick: go(async () => { await api("/admin/countries", { method: "PUT", body: { code: c.code, name: c.name, region: c.region || "", enabled: !c.enabled, order: c.order || 0, flag_url: c.flag_url || null } }); show("countries"); }) }, c.enabled ? "Disable" : "Enable")
-      ) : null)))));
+    isAdmin() ? h("div", { class: "panel row" }, code, nm, flag, h("button", { class: "btn primary", type: "button", onclick: go(async () => {
+      await api("/admin/countries", { method: "PUT", body: { code: code.value, name: nm.value, region: "", enabled: true, order: 0, flag_url: flag.value || null } });
+      show("countries");
+    }) }, "Add / update")) : null,
+    h("div", { class: "panel" }, table(["Flag", "Code", "Name", "Enabled", ""], rows))
+  );
 };
 
 VIEWS.inventory = async () => {
