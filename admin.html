@@ -316,7 +316,7 @@ nav.side button { justify-content: flex-start; }
     <form id="loginForm" novalidate>
       <div class="f"><label for="em">Email</label><input id="em" type="email" autocomplete="username" required></div>
       <div class="f"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
-      <div class="f" id="capBox"><label for="cap">Security code</label><div class="captcha"><img id="capImg" alt="Security code" width="210" height="70"><button class="btn sm" type="button" id="capNew" aria-label="Get a new code" title="New code">↻</button></div><input id="cap" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="8" placeholder="Type the characters you see"></div>
+      <div class="f" id="capBox"><label for="cap">Security code</label><div class="captcha"><img id="capImg" alt="Security code" width="210" height="70" style="min-width:210px;min-height:70px;background:#0b1430;display:block"><button class="btn sm" type="button" id="capNew" aria-label="Get a new code" title="New code">↻</button></div><input id="cap" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="8" placeholder="Type the characters you see"></div>
       <div id="mfaBox" class="hide">
         <div id="mfaSetup" class="hide"><p class="small">Scan this URI with an authenticator app (or enter the secret manually), then enter the 6‑digit code.</p><div class="f"><label>Secret</label><input id="mfaSecret" readonly></div><div class="f"><label>otpauth URI</label><textarea id="mfaUri" readonly></textarea></div></div>
         <div class="f"><label for="otp">Authentication code</label><input id="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
@@ -346,11 +346,24 @@ function toast(m, k = "") { const t = h("div", { class: "toast " + k, role: "sta
 const chip = (s) => h("span", { class: "chip " + (["paid", "published", "active", "ok", "matched", "approved", "delivered"].includes(s) ? "ok" : ["pending", "created", "draft", "open", "unfulfilled", "processing"].includes(s) ? "warn" : ["failed", "expired", "cancelled", "refunded", "suspended", "archived", "mismatch", "rejected"].includes(s) ? "bad" : "") }, s);
 
 async function api(path, { method = "GET", body, raw } = {}) {
-  const hd = { Accept: "application/json" }; if (st.token) hd.Authorization = "Bearer " + st.token; if (body !== undefined) hd["Content-Type"] = "application/json";
-  let r; try { r = await fetch(st.base + "/api" + path, { method, headers: hd, body: body !== undefined ? JSON.stringify(body) : undefined }); } catch { throw new Error("Cannot reach the server. Check the Server URL, HTTPS and the ALLOWED_ORIGINS setting."); }
+  const hd = { Accept: "application/json" };
+  if (st.token) hd.Authorization = "Bearer " + st.token;
+  if (body !== undefined) hd["Content-Type"] = "application/json";
+  const base = (st.base || "").replace(/\/$/, "");
+  const url = base + "/api" + path;
+  let r;
+  try {
+    r = await fetch(url, { method, headers: hd, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: base ? "omit" : "same-origin" });
+  } catch (err) {
+    throw new Error("Cannot reach " + url + " — leave Server URL empty when opening /admin on the same host.");
+  }
   if (raw && r.ok) return r;
-  let d = null; try { d = await r.json(); } catch {}
-  if (!r.ok) { if (r.status === 401 && st.user) { signedOut("Session expired. Please sign in again."); } throw new Error((d && d.error) || "Request failed (" + r.status + ")"); }
+  let d = null;
+  try { d = await r.json(); } catch {}
+  if (!r.ok) {
+    if (r.status === 401 && st.user) signedOut("Session expired. Please sign in again.");
+    throw new Error((d && d.error) || ("Request failed (" + r.status + ")"));
+  }
   return d;
 }
 const go = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, "bad"); } };
@@ -361,48 +374,72 @@ const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("the
 
 /* ---------- captcha ---------- */
 let capId = "";
-function setCapImage(dataUrl) {
+function paintCaptcha(dataUrl) {
   const img = $("#capImg");
   if (!img) return;
-  img.onerror = () => {
-    // Fallback: decode data-URI to a Blob URL (some browsers/CSP combos block long data: SVGs on <img>).
-    try {
-      const m = /^data:image\/svg\+xml;base64,(.+)$/i.exec(dataUrl || "");
-      if (!m) return;
-      const bytes = atob(m[1]);
-      const arr = new Uint8Array(bytes.length);
-      for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-      const blob = new Blob([arr], { type: "image/svg+xml" });
-      img.src = URL.createObjectURL(blob);
-    } catch (_) { /* leave broken icon */ }
-  };
-  img.src = dataUrl || "";
+  // Clear previous blob URLs
+  if (img.dataset.blob) {
+    try { URL.revokeObjectURL(img.dataset.blob); } catch (_) {}
+    delete img.dataset.blob;
+  }
+  img.removeAttribute("src");
+  img.onerror = null;
+  if (!dataUrl) return;
+  // Prefer decoding to Blob — most reliable under CSP
+  try {
+    const m = /^data:image\/svg\+xml;base64,(.+)$/i.exec(dataUrl);
+    if (m) {
+      const bin = atob(m[1]);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "image/svg+xml" });
+      const obj = URL.createObjectURL(blob);
+      img.dataset.blob = obj;
+      img.src = obj;
+      return;
+    }
+  } catch (_) {}
+  img.src = dataUrl;
 }
 async function loadCap() {
-  const inp = $("#cap"); if (inp) inp.value = "";
+  const inp = $("#cap");
+  if (inp) inp.value = "";
+  const err = $("#loginErr");
   try {
-    if (!$("#apiBase").value.trim()) st.base = "";
-    else st.base = $("#apiBase").value.trim().replace(/\/$/, "");
+    // Always prefer same-origin when the admin page is served by the app itself.
+    const typed = ($("#apiBase") && $("#apiBase").value || "").trim().replace(/\/$/, "");
+    st.base = typed;
     const c = await api("/auth/captcha");
-    capId = c.id;
-    setCapImage(c.image);
-    $("#loginErr").textContent = "";
+    if (!c || !c.image) throw new Error("Empty captcha response");
+    capId = c.id || "";
+    paintCaptcha(c.image);
+    if (err) err.textContent = "";
   } catch (e) {
-    // Fallback: fetch raw SVG endpoint (works when JSON/data-URI path is blocked).
+    // Last resort: hit the raw SVG endpoint
     try {
-      const r = await fetch((st.base || "") + "/api/auth/captcha.svg", { headers: { Accept: "image/svg+xml" }, cache: "no-store" });
-      if (!r.ok) throw new Error("captcha svg " + r.status);
+      const base = (st.base || "").replace(/\/$/, "");
+      const r = await fetch(base + "/api/auth/captcha.svg", { cache: "no-store", credentials: base ? "omit" : "same-origin" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
       capId = r.headers.get("X-Captcha-Id") || "";
       const blob = await r.blob();
-      $("#capImg").src = URL.createObjectURL(blob);
-      $("#loginErr").textContent = "";
+      const img = $("#capImg");
+      if (img.dataset.blob) { try { URL.revokeObjectURL(img.dataset.blob); } catch (_) {} }
+      const obj = URL.createObjectURL(blob);
+      img.dataset.blob = obj;
+      img.src = obj;
+      if (err) err.textContent = "";
     } catch (e2) {
-      $("#loginErr").textContent = (e.message || "Could not load security code") + " — check Server URL is empty when opening /admin from the same host.";
+      if (err) err.textContent = (e && e.message ? e.message : "Captcha failed") + " — leave Server URL blank if you opened /admin on this same site.";
     }
   }
 }
-$("#capNew").addEventListener("click", loadCap);
-$("#apiBase").addEventListener("change", () => { st.base = $("#apiBase").value.trim().replace(/\/$/, ""); SS.set("base", st.base); loadCap(); });
+if ($("#capNew")) $("#capNew").addEventListener("click", (ev) => { ev.preventDefault(); loadCap(); });
+if ($("#apiBase")) $("#apiBase").addEventListener("change", () => {
+  st.base = ($("#apiBase").value || "").trim().replace(/\/$/, "");
+  SS.set("base", st.base);
+  loadCap();
+});
+
 
 /* ---------- login / MFA ---------- */
 function signedOut(msg) { st.token = null; st.csrf = null; st.user = null; SS.del("tok"); $("#capBox").classList.remove("hide"); setTimeout(loadCap, 0); $("#appView").classList.add("hide"); $("#loginView").classList.remove("hide"); if (msg) $("#loginErr").textContent = msg; }
@@ -623,8 +660,9 @@ VIEWS.settings = async () => {
 
 /* resume session after reload */
 st.base = (SS.get("base") || "").replace(/\/$/, "");
-$("#apiBase").value = st.base;
-loadCap();
+if ($("#apiBase")) $("#apiBase").value = st.base;
+// Defer captcha until the login form nodes are in the document.
+setTimeout(() => { try { loadCap(); } catch (e) { console.error(e); } }, 0);
 (async () => {
   const t = SS.get("tok");
   if (!t) return;
