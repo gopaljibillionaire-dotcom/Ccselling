@@ -141,32 +141,38 @@ function authDialog(mode = "login") {
   function makeLocalCaptcha() {
     const text = Array.from({ length: 5 }, () => CAP_CHARS[Math.floor(Math.random() * CAP_CHARS.length)]).join("");
     const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
-    const cols = ["#e8eefc", "#67e8f9", "#93c5fd", "#c4b5fd", "#a5f3fc"];
     const w = 210, h = 70;
-    let parts = [
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`,
-      `<defs><linearGradient id="b" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1430"/><stop offset="1" stop-color="#16285a"/></linearGradient></defs>`,
-      `<rect width="${w}" height="${h}" rx="12" fill="url(#b)"/>`
-    ];
-    for (let i = 0; i < 5; i++) {
-      const y1 = rnd(8, h - 8), y2 = rnd(8, h - 8), y3 = rnd(8, h - 8);
-      parts.push(`<path d="M0 ${y1} C ${w / 3} ${y2}, ${2 * w / 3} ${y3}, ${w} ${rnd(8, h - 8)}" stroke="${cols[rnd(0, cols.length - 1)]}" stroke-opacity=".28" stroke-width="1.4" fill="none"/>`);
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    const g = ctx.createLinearGradient(0, 0, w, h);
+    g.addColorStop(0, "#0b1430"); g.addColorStop(1, "#16285a");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    const cols = ["#e8eefc", "#67e8f9", "#93c5fd", "#c4b5fd", "#a5f3fc"];
+    for (let i = 0; i < 6; i++) {
+      ctx.strokeStyle = cols[rnd(0, cols.length - 1)]; ctx.globalAlpha = 0.28; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(0, rnd(8, h - 8));
+      ctx.bezierCurveTo(w / 3, rnd(8, h - 8), (2 * w) / 3, rnd(8, h - 8), w, rnd(8, h - 8));
+      ctx.stroke();
     }
-    for (let i = 0; i < 36; i++) {
-      parts.push(`<circle cx="${rnd(2, w - 2)}" cy="${rnd(2, h - 2)}" r="${[0.8, 1.1, 1.6][rnd(0, 2)]}" fill="${cols[rnd(0, cols.length - 1)]}" fill-opacity=".35"/>`);
+    for (let i = 0; i < 40; i++) {
+      ctx.globalAlpha = 0.35; ctx.fillStyle = cols[rnd(0, cols.length - 1)];
+      ctx.beginPath(); ctx.arc(rnd(2, w - 2), rnd(2, h - 2), [0.8, 1.1, 1.6][rnd(0, 2)], 0, Math.PI * 2); ctx.fill();
     }
+    ctx.globalAlpha = 1;
     const step = (w - 36) / text.length;
     for (let i = 0; i < text.length; i++) {
-      const x = 20 + i * step + rnd(-3, 3);
-      const y = h / 2 + 12 + rnd(-6, 6);
-      const ch = text[i];
-      parts.push(`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" font-size="${rnd(30, 38)}" font-weight="700" font-family="Verdana, DejaVu Sans, Arial, sans-serif" fill="${cols[rnd(0, cols.length - 1)]}" transform="rotate(${rnd(-24, 24)} ${x.toFixed(1)} ${y.toFixed(1)})">${ch}</text>`);
+      const x = 20 + i * step + rnd(-3, 3), y = h / 2 + 10 + rnd(-6, 6);
+      ctx.save(); ctx.translate(x, y); ctx.rotate((rnd(-24, 24) * Math.PI) / 180);
+      ctx.font = "bold " + rnd(30, 38) + "px Verdana, Arial, sans-serif";
+      ctx.fillStyle = cols[rnd(0, cols.length - 1)]; ctx.textBaseline = "middle";
+      ctx.fillText(text[i], 0, 0); ctx.restore();
     }
-    parts.push(`<path d="M6 ${rnd(22, 48)} Q ${w / 2} ${rnd(8, 62)}, ${w - 6} ${rnd(22, 48)}" stroke="#e8eefc" stroke-opacity=".55" stroke-width="1.6" fill="none"/>`);
-    parts.push("</svg>");
-    const svg = parts.join("");
-    const b64 = btoa(unescape(encodeURIComponent(svg)));
-    return { text, image: "data:image/svg+xml;base64," + b64, id: "local." + Date.now().toString(36) + "." + Math.random().toString(36).slice(2, 10) };
+    ctx.globalAlpha = 0.55; ctx.strokeStyle = "#e8eefc"; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(6, rnd(22, 48));
+    ctx.quadraticCurveTo(w / 2, rnd(8, 62), w - 6, rnd(22, 48)); ctx.stroke();
+    ctx.globalAlpha = 1;
+    return { text, image: canvas.toDataURL("image/png"), id: "local." + Date.now().toString(36) + "." + Math.random().toString(36).slice(2, 10) };
   }
   const capImg = h("img", { class: "captcha-img", alt: "Security code", width: "210", height: "70" });
   const capIn = h("input", { id: "a_cap", type: "text", autocomplete: "off", autocapitalize: "characters", spellcheck: "false", maxlength: "8", placeholder: "Type the characters you see", required: true });
@@ -174,21 +180,10 @@ function authDialog(mode = "login") {
     capIn.value = "";
     try {
       const c = makeLocalCaptcha();
-      capId = c.id;
-      capAnswer = c.text;
-      capImg.onerror = () => {
-        try {
-          const m = /^data:image\/svg\+xml;base64,(.+)$/i.exec(c.image || "");
-          if (!m) return;
-          const bytes = atob(m[1]);
-          const arr = new Uint8Array(bytes.length);
-          for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-          capImg.src = URL.createObjectURL(new Blob([arr], { type: "image/svg+xml" }));
-        } catch (_) {}
-      };
+      capId = c.id; capAnswer = c.text;
       capImg.src = c.image;
       err.textContent = "";
-    } catch (x) { err.textContent = "Could not draw security code."; }
+    } catch (x) { err.textContent = "Could not draw security code."; console.error(x); }
   };
   const checkLocalCap = () => {
     const guess = (capIn.value || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
