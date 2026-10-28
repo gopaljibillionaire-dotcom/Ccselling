@@ -3,6 +3,7 @@
 (() => {
 const $ = (s, r = document) => r.querySelector(s);
 const state = { user: null, csrf: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0 };
+const _homeCache = { at: 0, key: "", data: null };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
@@ -325,12 +326,12 @@ async function homeView() {
       typeEl.textContent = full.slice(0, ci + 1);
       ci++;
       if (ci >= full.length) { deleting = true; setTimeout(tick, 1400); return; }
-      setTimeout(tick, 70);
+      setTimeout(tick, 90);
     } else {
       typeEl.textContent = full.slice(0, ci - 1);
       ci--;
       if (ci <= 0) { deleting = false; pi = (pi + 1) % phrases.length; setTimeout(tick, 400); return; }
-      setTimeout(tick, 40);
+      setTimeout(tick, 55);
     }
   };
   setTimeout(tick, 400);
@@ -346,7 +347,14 @@ async function homeView() {
 
   let stats = { active_users: 0, total_buyers: 0, avg_review: null, available_cards: 0, available_countries: 0 };
   try {
-    const data = await api("/home" + (state.country ? `?country=${state.country}` : ""));
+    const homeKey = state.country || "";
+    let data;
+    if (_homeCache.data && _homeCache.key === homeKey && (Date.now() - _homeCache.at) < 30000) {
+      data = _homeCache.data;
+    } else {
+      data = await api("/home" + (homeKey ? `?country=${homeKey}` : ""));
+      _homeCache.at = Date.now(); _homeCache.key = homeKey; _homeCache.data = data;
+    }
     if (data.stats) stats = { ...stats, ...data.stats };
     const fmt = (n) => (n == null || n === undefined) ? "—" : String(n);
     const avgTxt = stats.avg_review != null ? Number(stats.avg_review).toFixed(1) + " ★" : "—";
@@ -637,7 +645,7 @@ function setupSearch() {
   const q = $("#q"), box = $("#suggest"); let t = null, items = [], active = -1;
   const hideBox = () => { box.classList.add("hide"); q.setAttribute("aria-expanded", "false"); active = -1; };
   const go = (text) => { hideBox(); location.hash = "#/shop?q=" + encodeURIComponent(text.trim().slice(0, 80)); };
-  q.addEventListener("input", () => { clearTimeout(t); const v = q.value.trim(); if (v.length < 2) return hideBox(); t = setTimeout(async () => { try { const r = await api("/products/suggest?q=" + encodeURIComponent(v)); items = r.suggestions; clear(box); active = -1; if (!items.length) return hideBox(); items.forEach((s, i) => box.append(h("button", { type: "button", role: "option", id: "sg" + i, onclick: () => { hideBox(); location.hash = "#/p/" + encodeURIComponent(s.slug); } }, s.name))); box.classList.remove("hide"); q.setAttribute("aria-expanded", "true"); } catch { hideBox(); } }, 250); });
+  q.addEventListener("input", () => { clearTimeout(t); const v = q.value.trim(); if (v.length < 2) return hideBox(); t = setTimeout(async () => { try { const r = await api("/products/suggest?q=" + encodeURIComponent(v)); items = r.suggestions; clear(box); active = -1; if (!items.length) return hideBox(); items.forEach((s, i) => box.append(h("button", { type: "button", role: "option", id: "sg" + i, onclick: () => { hideBox(); location.hash = "#/p/" + encodeURIComponent(s.slug); } }, s.name))); box.classList.remove("hide"); q.setAttribute("aria-expanded", "true"); } catch { hideBox(); } }, 320); });
   q.addEventListener("keydown", (e) => { const b = [...box.children]; if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); if (!b.length) return; active = (active + (e.key === "ArrowDown" ? 1 : -1) + b.length) % b.length; b.forEach((x, i) => x.setAttribute("aria-selected", String(i === active))); } else if (e.key === "Enter" && active >= 0) { e.preventDefault(); b[active].click(); } else if (e.key === "Escape") hideBox(); });
   $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); if (q.value.trim()) go(q.value); }); document.addEventListener("click", (e) => { if (!e.target.closest(".search")) hideBox(); });
 }
@@ -678,7 +686,7 @@ async function boot() {
     if (back.startsWith("DEP-")) { location.hash = "#/account/wallet"; toast(st === "paid" ? "Payment verified - your wallet has been credited." : st === "pending" ? "Waiting for the network to confirm your payment…" : "That payment did not complete.", st === "paid" ? "ok" : ""); }
     else location.hash = "#/orders/" + back;
   } else if (back) location.hash = back.startsWith("ORD-") ? "#/orders/" + back : "#/account/wallet";
-  window.addEventListener("hashchange", route); route(); pollNotifs(); setInterval(pollNotifs, 60000);
+  window.addEventListener("hashchange", route); route(); pollNotifs(); setInterval(pollNotifs, 120000);
 }
 function resetDialog(token) {
   const pw = h("input", { type: "password", id: "rs_p", autocomplete: "new-password", required: true }); const err = h("div", { class: "error-text", role: "alert" });

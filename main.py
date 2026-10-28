@@ -1779,31 +1779,45 @@ async def home(country: str = "") -> dict:
 
     # storefront stats (best-effort; never fail the page)
     try:
-        active_users = await db()["users"].count_documents({"status": "active", "role": "customer"})
-        total_buyers = await db()["users"].count_documents({"status": "active", "lifetime_spend_minor": {"$gt": 0}})
-        # count any non-archived product as "available" so draft cards still show in the glance number;
-        # shop listing itself still only shows published.
-        # any product that is not archived counts as available inventory for the glance counter
-        available_cards = await db()["products"].count_documents({"status": {"$ne": "archived"}})
+        # Active users: any active account that is not staff (covers missing/legacy role field)
+        active_users = await db()["users"].count_documents({
+            "status": "active",
+            "$or": [
+                {"role": "customer"},
+                {"role": {"$exists": False}},
+                {"role": None},
+                {"role": ""},
+            ],
+        })
+        if active_users == 0:
+            # fallback: every active non-staff document
+            active_users = await db()["users"].count_documents({
+                "status": "active",
+                "role": {"$nin": list(STAFF_ROLES)},
+            })
+        total_buyers = await db()["users"].count_documents({
+            "status": "active",
+            "lifetime_spend_minor": {"$gt": 0},
+        })
+        # Cards on the shelf: prefer published; if none, show non-archived so admin sees inventory
         published_cards = await db()["products"].count_documents({"status": "published"})
         if published_cards > 0:
             available_cards = published_cards
-        elif available_cards == 0:
-            # last resort: any product document at all
-            available_cards = await db()["products"].count_documents({})
-        enabled = [c for c in ctx["countries"].values() if c.get("enabled", True)]
+        else:
+            available_cards = await db()["products"].count_documents({"status": {"$ne": "archived"}})
+            if available_cards == 0:
+                available_cards = await db()["products"].count_documents({})
+        # Countries: enabled catalog entries, else distinct product countries
+        enabled = [c for c in (ctx.get("countries") or {}).values() if c.get("enabled", True)]
         available_countries = len(enabled)
-        if available_countries == 0:
-            try:
-                codes = await db()["products"].distinct("country", {"status": {"$in": ["published", "draft"]}})
-                available_countries = len([c for c in codes if c])
-            except Exception:
-                available_countries = 0
-        # also surface distinct countries from published products when countries collection is sparse
         try:
-            pcodes = await db()["products"].distinct("country", {"status": "published"})
-            if len([c for c in pcodes if c]) > available_countries:
-                available_countries = len([c for c in pcodes if c])
+            pcodes = await db()["products"].distinct(
+                "country",
+                {"status": {"$in": ["published", "draft"]}},
+            )
+            n = len([c for c in pcodes if c])
+            if n > available_countries:
+                available_countries = n
         except Exception:
             pass
         pipe = [

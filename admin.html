@@ -359,50 +359,48 @@ function modal(title, node) { const d = $("#dlg"); clear(d).append(h("div", { cl
 const field = (label, input, hint) => h("div", { class: "f" }, h("label", null, label), input, hint ? h("div", { class: "hint" }, hint) : null);
 const table = (heads, rows) => h("div", { class: "tw" }, h("table", null, h("thead", null, h("tr", null, heads.map((x) => h("th", null, x)))), h("tbody", null, rows.length ? rows : h("tr", null, h("td", { colspan: heads.length, class: "muted" }, "Nothing here yet.")))));
 
-/* ---------- local captcha (canvas — no server, no CSP data: issues) ---------- */
+/* ---------- local captcha (canvas + blob URL — works under strict CSP) ---------- */
 let capId = "";
 let capAnswer = "";
+let capObjectUrl = null;
 const CAP_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
 function makeLocalCaptcha() {
   const text = Array.from({ length: 5 }, () => CAP_CHARS[Math.floor(Math.random() * CAP_CHARS.length)]).join("");
   const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
-  const w = 210, h = 70;
+  const w = 210, hh = 70;
   const canvas = document.createElement("canvas");
   canvas.width = w;
-  canvas.height = h;
+  canvas.height = hh;
   const ctx = canvas.getContext("2d");
-  // background
-  const g = ctx.createLinearGradient(0, 0, w, h);
+  if (!ctx) throw new Error("canvas unsupported");
+  const g = ctx.createLinearGradient(0, 0, w, hh);
   g.addColorStop(0, "#0b1430");
   g.addColorStop(1, "#16285a");
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, w, h);
-  // noise lines
+  ctx.fillRect(0, 0, w, hh);
   const cols = ["#e8eefc", "#67e8f9", "#93c5fd", "#c4b5fd", "#a5f3fc"];
   for (let i = 0; i < 6; i++) {
     ctx.strokeStyle = cols[rnd(0, cols.length - 1)];
     ctx.globalAlpha = 0.28;
     ctx.lineWidth = 1.4;
     ctx.beginPath();
-    ctx.moveTo(0, rnd(8, h - 8));
-    ctx.bezierCurveTo(w / 3, rnd(8, h - 8), (2 * w) / 3, rnd(8, h - 8), w, rnd(8, h - 8));
+    ctx.moveTo(0, rnd(8, hh - 8));
+    ctx.bezierCurveTo(w / 3, rnd(8, hh - 8), (2 * w) / 3, rnd(8, hh - 8), w, rnd(8, hh - 8));
     ctx.stroke();
   }
-  // speckles
   for (let i = 0; i < 40; i++) {
     ctx.globalAlpha = 0.35;
     ctx.fillStyle = cols[rnd(0, cols.length - 1)];
     ctx.beginPath();
-    ctx.arc(rnd(2, w - 2), rnd(2, h - 2), [0.8, 1.1, 1.6][rnd(0, 2)], 0, Math.PI * 2);
+    ctx.arc(rnd(2, w - 2), rnd(2, hh - 2), [0.8, 1.1, 1.6][rnd(0, 2)], 0, Math.PI * 2);
     ctx.fill();
   }
-  // letters
   ctx.globalAlpha = 1;
   const step = (w - 36) / text.length;
   for (let i = 0; i < text.length; i++) {
     const x = 20 + i * step + rnd(-3, 3);
-    const y = h / 2 + 10 + rnd(-6, 6);
+    const y = hh / 2 + 10 + rnd(-6, 6);
     const rot = (rnd(-24, 24) * Math.PI) / 180;
     ctx.save();
     ctx.translate(x, y);
@@ -413,7 +411,6 @@ function makeLocalCaptcha() {
     ctx.fillText(text[i], 0, 0);
     ctx.restore();
   }
-  // strike line
   ctx.globalAlpha = 0.55;
   ctx.strokeStyle = "#e8eefc";
   ctx.lineWidth = 1.6;
@@ -424,39 +421,62 @@ function makeLocalCaptcha() {
   ctx.globalAlpha = 1;
   return {
     text,
-    image: canvas.toDataURL("image/png"),
+    canvas,
     id: "local." + Date.now().toString(36) + "." + Math.random().toString(36).slice(2, 10)
   };
 }
 
-function setCapImage(dataUrl) {
+function setCapImageFromCanvas(canvas) {
   const img = $("#capImg");
-  if (!img) return;
-  img.removeAttribute("src");
-  img.src = dataUrl || "";
+  if (!img || !canvas) return false;
+  try {
+    // Synchronous data URL — always works under CSP img-src data: and avoids async toBlob races
+    const url = canvas.toDataURL("image/png");
+    img.removeAttribute("src");
+    img.src = url;
+    img.style.display = "block";
+    return true;
+  } catch (e) {
+    console.error("captcha image set failed", e);
+    return false;
+  }
 }
 
 function loadCap() {
   const inp = $("#cap");
   if (inp) inp.value = "";
+  const err = $("#loginErr");
+  const img = $("#capImg");
   try {
     const c = makeLocalCaptcha();
     capId = c.id;
     capAnswer = c.text;
-    setCapImage(c.image);
-    if ($("#loginErr")) $("#loginErr").textContent = "";
+    if (!setCapImageFromCanvas(c.canvas)) {
+      // last resort: draw blank with text so login is not blocked visually
+      if (img) {
+        img.alt = "Code: " + c.text;
+        img.src = "data:image/svg+xml," + encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="210" height="70">' +
+          '<rect width="210" height="70" fill="#0b1430"/>' +
+          '<text x="105" y="42" text-anchor="middle" fill="#e8eefc" font-size="28" font-family="monospace" letter-spacing="6">' +
+          c.text + "</text></svg>"
+        );
+      }
+    }
+    if (err) err.textContent = "";
   } catch (e) {
-    if ($("#loginErr")) $("#loginErr").textContent = "Could not draw security code. Refresh the page.";
+    if (err) err.textContent = "Could not draw security code. Refresh the page.";
     console.error("captcha draw failed", e);
   }
 }
 
 function checkLocalCap() {
-  const guess = ($("#cap").value || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  const guess = (($("#cap") && $("#cap").value) || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
   return !!capAnswer && guess === String(capAnswer).toUpperCase();
 }
 
-$("#capNew").addEventListener("click", loadCap);
+const capNewBtn = $("#capNew");
+if (capNewBtn) capNewBtn.addEventListener("click", function (ev) { ev.preventDefault(); loadCap(); });
 $("#apiBase").addEventListener("change", () => {
   st.base = $("#apiBase").value.trim().replace(/\/$/, "");
   SS.set("base", st.base);
@@ -911,7 +931,10 @@ VIEWS.settings = async () => {
 /* resume session after reload */
 st.base = (SS.get("base") || "").replace(/\/$/, "");
 $("#apiBase").value = st.base;
-loadCap();
+try { if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', loadCap); else loadCap(); } catch (e) { console.error(e); }
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", function () { try { loadCap(); } catch (e) { console.error(e); } });
+}
 (async () => {
   const t = SS.get("tok");
   if (!t) return;
