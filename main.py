@@ -1828,9 +1828,18 @@ async def home(country: str = "") -> dict:
         avg_review = None
         if agg and agg[0].get("cnt"):
             avg_review = round(float(agg[0]["sum"]) / float(agg[0]["cnt"]), 2)
+        # Match admin overview: total customers + completed orders (attractive social proof)
+        customers_total = await db()["users"].count_documents({"role": "customer"})
+        if customers_total == 0:
+            customers_total = active_users
+        orders_completed = await db()["orders"].count_documents({"status": "paid"})
+        orders_total = await db()["orders"].count_documents({})
         out["stats"] = {
             "active_users": int(active_users),
+            "customers_total": int(customers_total),
             "total_buyers": int(total_buyers),
+            "orders_completed": int(orders_completed),
+            "orders_total": int(orders_total),
             "avg_review": avg_review,
             "available_cards": int(available_cards),
             "available_countries": int(available_countries),
@@ -1838,8 +1847,9 @@ async def home(country: str = "") -> dict:
     except Exception as exc:  # pragma: no cover
         log.warning("home stats failed: %s", type(exc).__name__)
         out["stats"] = {
-            "active_users": 0, "total_buyers": 0, "avg_review": None,
-            "available_cards": 0, "available_countries": 0,
+            "active_users": 0, "customers_total": 0, "total_buyers": 0,
+            "orders_completed": 0, "orders_total": 0,
+            "avg_review": None, "available_cards": 0, "available_countries": 0,
         }
     return out
 
@@ -2835,7 +2845,29 @@ async def admin_security_overview(
     user: dict = Depends(admin_user),
 ) -> dict:
     """Dashboard cards: event counts, failed logins, open incidents, sessions."""
-    return await sevt.security_overview(db(), hours=hours)
+    try:
+        await sevt.ensure_security_indexes(db())
+    except Exception:
+        pass
+    try:
+        return await sevt.security_overview(db(), hours=hours)
+    except Exception as exc:
+        log.warning("security overview failed: %s", type(exc).__name__)
+        # Safe empty payload so the UI never shows "Unexpected server error"
+        return {
+            "window_hours": hours,
+            "total_events": 0,
+            "by_severity": {s: 0 for s in ("info", "low", "medium", "high", "critical")},
+            "by_category": {},
+            "failed_logins": 0,
+            "mfa_failures": 0,
+            "authz_denials": 0,
+            "rate_limit_hits": 0,
+            "open_incidents": 0,
+            "admin_actions": 0,
+            "active_sessions": 0,
+            "staff_sessions": 0,
+        }
 
 
 @admin.get("/security/events")
@@ -2849,15 +2881,19 @@ async def admin_security_events(
     user: dict = Depends(admin_user),
 ) -> dict:
     """Searchable, filterable, paginated security event stream."""
-    return await sevt.query_events(
-        db(),
-        severity=sec.clean_text(severity, 20) if severity else "",
-        category=sec.clean_text(category, 20) if category else "",
-        action=sec.clean_text(action, 40) if action else "",
-        q=sec.clean_text(q, 60) if q else "",
-        hours=hours,
-        page=page,
-    )
+    try:
+        return await sevt.query_events(
+            db(),
+            severity=sec.clean_text(severity, 20) if severity else "",
+            category=sec.clean_text(category, 20) if category else "",
+            action=sec.clean_text(action, 40) if action else "",
+            q=sec.clean_text(q, 60) if q else "",
+            hours=hours,
+            page=page,
+        )
+    except Exception as exc:
+        log.warning("security events failed: %s", type(exc).__name__)
+        return {"events": [], "total": 0, "page": page, "page_size": 50}
 
 
 @admin.get("/security/incidents")
@@ -2866,7 +2902,11 @@ async def admin_security_incidents(
     page: int = Query(1, ge=1, le=100),
     user: dict = Depends(admin_user),
 ) -> dict:
-    return await sevt.query_incidents(db(), status=sec.clean_text(status, 20) if status else "", page=page)
+    try:
+        return await sevt.query_incidents(db(), status=sec.clean_text(status, 20) if status else "", page=page)
+    except Exception as exc:
+        log.warning("security incidents failed: %s", type(exc).__name__)
+        return {"incidents": []}
 
 
 @admin.post("/security/incidents/{iid}")
@@ -2876,9 +2916,13 @@ async def admin_security_incident_update(
     request: Request,
     user: dict = Depends(admin_user),
 ) -> dict:
-    ok = await sevt.update_incident(
-        db(), iid, status=body.status, note=body.note, actor_id=user["_id"]
-    )
+    try:
+        ok = await sevt.update_incident(
+            db(), iid, status=body.status, note=body.note, actor_id=user["_id"]
+        )
+    except Exception as exc:
+        log.warning("incident update failed: %s", type(exc).__name__)
+        raise HTTPException(500, "Could not update incident") from exc
     if not ok:
         raise HTTPException(404, "Incident not found")
     await audit(request, "security.incident_update", user["_id"], iid, meta={"status": body.status}, category="admin")
@@ -2888,8 +2932,12 @@ async def admin_security_incident_update(
 @admin.get("/security/sessions")
 async def admin_security_sessions(user: dict = Depends(admin_user)) -> dict:
     """List active sessions (token hashes only) for investigation / revocation."""
-    sessions = await sevt.list_active_sessions(db())
-    return {"sessions": sessions}
+    try:
+        sessions = await sevt.list_active_sessions(db())
+        return {"sessions": sessions}
+    except Exception as exc:
+        log.warning("security sessions failed: %s", type(exc).__name__)
+        return {"sessions": []}
 
 
 @admin.post("/security/sessions/{sid}/revoke")

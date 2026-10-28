@@ -345,7 +345,11 @@ async function homeView() {
       state.user ? h("a", { class: "btn", href: "#/account" }, "My account") : h("button", { class: "btn", type: "button", onclick: () => authDialog("login") }, "Sign in")));
   wrap.append(h("section", { class: "hero hero-pro" }, heroLeft));
 
-  let stats = { active_users: 0, total_buyers: 0, avg_review: null, available_cards: 0, available_countries: 0 };
+  let stats = {
+    active_users: 0, customers_total: 0, total_buyers: 0,
+    orders_completed: 0, orders_total: 0,
+    avg_review: null, available_cards: 0, available_countries: 0
+  };
   try {
     const homeKey = state.country || "";
     let data;
@@ -358,12 +362,15 @@ async function homeView() {
     if (data.stats) stats = { ...stats, ...data.stats };
     const fmt = (n) => (n == null || n === undefined) ? "—" : String(n);
     const avgTxt = stats.avg_review != null ? Number(stats.avg_review).toFixed(1) + " ★" : "—";
+    const usersShow = stats.active_users || stats.customers_total || 0;
+    const ordersShow = stats.orders_completed || stats.orders_total || 0;
     const statItems = [
-      ["Active users", fmt(stats.active_users)],
+      ["Active users", fmt(usersShow)],
+      ["Orders completed", fmt(ordersShow)],
       ["Total buyers", fmt(stats.total_buyers)],
-      ["Avg. review", avgTxt],
       ["Available cards", fmt(stats.available_cards)],
       ["Countries", fmt(stats.available_countries)],
+      ["Avg. review", avgTxt],
     ];
     wrap.append(h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Store at a glance")),

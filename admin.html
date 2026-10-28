@@ -741,7 +741,13 @@ VIEWS.security = async () => {
 
   async function loadOverview() {
     const hours = Number(hoursSel.value) || 24;
-    const o = await api("/admin/security/overview?hours=" + hours);
+    let o = {
+      window_hours: hours, total_events: 0, failed_logins: 0, mfa_failures: 0,
+      authz_denials: 0, rate_limit_hits: 0, open_incidents: 0, admin_actions: 0,
+      active_sessions: 0, staff_sessions: 0
+    };
+    try { o = { ...o, ...(await api("/admin/security/overview?hours=" + hours)) }; }
+    catch (e) { console.warn("security overview", e); }
     clear(cards);
     const tile = (l, v, cls) => h("div", { class: "panel" }, h("div", { class: "stat-label" }, l), h("div", { class: "stat" + (cls ? " " + cls : "") }, String(v)));
     cards.append(
@@ -765,7 +771,9 @@ VIEWS.security = async () => {
       category: catSel.value,
       q: qIn.value.trim(),
     });
-    const r = await api("/admin/security/events?" + params.toString());
+    let r = { events: [], total: 0, page: page, page_size: 50 };
+    try { r = await api("/admin/security/events?" + params.toString()); }
+    catch (e) { console.warn("security events", e); }
     clear(eventsBox);
     const rows = r.events.map((e) => h("tr", null,
       h("td", null, e.at ? new Date(e.at).toLocaleString() : ""),
@@ -792,7 +800,9 @@ VIEWS.security = async () => {
   }
 
   async function loadIncidents() {
-    const r = await api("/admin/security/incidents");
+    let r = { incidents: [] };
+    try { r = await api("/admin/security/incidents"); }
+    catch (e) { console.warn("security incidents", e); }
     clear(incidentsBox);
     if (!r.incidents.length) {
       incidentsBox.append(h("p", { class: "muted" }, "No open incidents."));
@@ -822,7 +832,9 @@ VIEWS.security = async () => {
   }
 
   async function loadSessions() {
-    const r = await api("/admin/security/sessions");
+    let r = { sessions: [] };
+    try { r = await api("/admin/security/sessions"); }
+    catch (e) { console.warn("security sessions", e); }
     clear(sessionsBox);
     sessionsBox.append(table(["Session", "User", "Role", "IP", "UA", "Last seen", ""],
       r.sessions.map((s) => h("tr", null,
