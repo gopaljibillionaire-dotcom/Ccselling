@@ -1,65 +1,151 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>CCS shop - Premium marketplace</title>
-<meta name="description" content="Country-first premium marketplace with member rewards and secure crypto checkout.">
-<meta name="theme-color" content="#070d1f">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>CCS Shop</title>
+<meta name="theme-color" content="#f5f7fb">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="/style.css">
-<script nonce="{{NONCE}}">try{var t=localStorage.getItem("theme")||"light";document.documentElement.setAttribute("data-theme",t)}catch(e){document.documentElement.setAttribute("data-theme","light")}</script>
+<style nonce="{{NONCE}}">
+html, body { min-height: 100%; }
+body.tg-mini {
+  margin: 0; padding: 0;
+  padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  background: var(--bg); color: var(--text); font-family: var(--font);
+}
+.tg-wrap { width: 100%; max-width: 720px; margin: 0 auto; padding: 12px 14px 24px; }
+.tg-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line);
+}
+.tg-brand { font-weight: 800; font-size: 1.15rem; letter-spacing: -.02em; color: var(--text); }
+.tg-user { display: flex; align-items: center; gap: 8px; font-size: .85rem; color: var(--muted); min-width: 0; }
+.tg-user img {
+  width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
+  background: var(--panel-solid); border: 1px solid var(--line); flex: none;
+}
+.tg-user .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
+.tg-bal { font-weight: 700; color: var(--accent); white-space: nowrap; }
+.tg-tabs {
+  display: flex; gap: 6px; overflow-x: auto; margin-bottom: 14px;
+  padding-bottom: 2px; scrollbar-width: none;
+}
+.tg-tabs::-webkit-scrollbar { display: none; }
+.tg-tab {
+  flex: none; padding: 8px 14px; border-radius: 99px;
+  border: 1px solid var(--line); background: var(--panel-solid);
+  color: var(--text); font: inherit; font-size: .88rem; font-weight: 600;
+  cursor: pointer; min-height: 36px;
+}
+.tg-tab.active {
+  border-color: var(--accent); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-solid));
+}
+.tg-tab.admin-only { display: none; }
+.tg-tab.admin-only.show { display: inline-flex; }
+.tg-search { width: 100%; margin-bottom: 12px; border-radius: 99px; padding-left: 14px; padding-right: 14px; }
+.tg-list { display: flex; flex-direction: column; gap: 10px; }
+.tg-card {
+  background: var(--panel-solid); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px 14px;
+}
+.tg-card .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.tg-card .bin {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--accent); font-weight: 700; letter-spacing: .04em; font-size: .95rem;
+}
+.tg-card .meta { font-size: .8rem; color: var(--muted); margin-top: 4px; line-height: 1.35; }
+.tg-card .price { font-weight: 800; font-size: 1.05rem; color: var(--text); }
+.tg-card .actions { display: flex; gap: 6px; margin-top: 2px; justify-content: flex-end; }
+.tg-empty {
+  text-align: center; padding: 40px 16px; color: var(--muted);
+  border: 1px dashed var(--line); border-radius: var(--radius);
+}
+.tg-secret {
+  background: color-mix(in srgb, var(--bg) 70%, #000);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; font-family: ui-monospace, monospace;
+  font-size: .88rem; word-break: break-all; margin: 8px 0;
+}
+:root[data-theme="light"] .tg-secret { background: #f0f3f9; }
+.tg-stat-grid {
+  display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+.tg-stat {
+  background: var(--panel-solid); border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px 12px; text-align: center;
+}
+.tg-stat .n { font-size: 1.45rem; font-weight: 800; letter-spacing: -.02em; }
+.tg-stat .l {
+  font-size: .72rem; color: var(--muted); margin-top: 4px;
+  text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
+}
+.tg-toast {
+  position: fixed; left: 12px; right: 12px; bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 90; background: var(--panel-solid); border: 1px solid var(--line);
+  border-left: 4px solid var(--accent); padding: 10px 14px; border-radius: 10px;
+  box-shadow: var(--shadow); max-width: 720px; margin: 0 auto;
+}
+.tg-toast.bad { border-left-color: var(--bad); }
+.tg-toast.ok { border-left-color: var(--ok); }
+.tg-bottom {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  background: var(--panel-solid); border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.tg-bottom button {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 10px 0 8px; color: var(--muted); font-size: .72rem;
+  background: none; border: 0; font: inherit; cursor: pointer;
+}
+.tg-bottom button[aria-current="page"] { color: var(--accent); }
+.tg-bottom .ico {
+  width: 22px; height: 22px; fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.chip.ok { color: var(--ok); border-color: rgba(52, 211, 153, .4); }
+.chip.bad { color: var(--bad); border-color: rgba(248, 113, 113, .4); }
+.chip.warn { color: var(--warn); border-color: rgba(251, 191, 36, .4); }
+</style>
 </head>
-<body>
-<a class="skip" href="#app">Skip to content</a>
-<div class="loading-bar" id="loadbar" aria-hidden="true"></div>
-
-<header class="header">
-  <div class="container">
-    <div class="bar">
-      <button class="btn icon mobile-only" id="menuBtn" aria-label="Open menu" aria-expanded="false" aria-controls="catnav" type="button"><svg class="ico-svg" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-      <a class="logo" href="#/" aria-label="Home">
-        <span id="brandName">CCS shop</span>
-      </a>
-      <form class="search" id="searchForm" role="search" autocomplete="off">
-        <label class="sr-only" for="q">Search products</label>
-        <svg class="ico ico-svg" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input id="q" type="search" maxlength="80" placeholder="Search products" role="combobox" aria-expanded="false" aria-controls="suggest" aria-autocomplete="list">
-        <div class="suggest hide" id="suggest" role="listbox"></div>
-      </form>
-      <label class="sr-only" for="countrySel">Country</label>
-      <select id="countrySel" class="country-select desktop-only"><option value="">All countries</option></select>
-      <button class="btn icon desktop-only" id="themeBtn" type="button" aria-label="Toggle light or dark theme"><svg class="ico-svg" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
-      <button class="btn icon" id="notifBtn" type="button" aria-label="Notifications"><svg class="ico-svg" viewBox="0 0 24 24"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 0 0 4 0"/></svg><span class="badge-count hide" id="notifCount">0</span></button>
-      <a class="btn icon desktop-only" href="#/cart" aria-label="Cart"><svg class="ico-svg" viewBox="0 0 24 24"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M3 4h2.5l2.2 10.5h10.6L20.5 7H6.2"/></svg><span class="badge-count hide" id="cartCount">0</span></a>
-      <button class="btn desktop-only" id="authBtn" type="button">Sign in</button>
-      <a class="btn primary desktop-only hide" id="acctBtn" href="#/account">Account</a>
+<body class="tg-mini">
+<div class="tg-wrap">
+  <div class="tg-top">
+    <div class="tg-brand" id="brand">CCS Shop</div>
+    <div class="tg-user" id="userchip">
+      <span class="name" id="uname">…</span>
+      <span class="tg-bal" id="bal"></span>
     </div>
   </div>
-  <nav class="catnav" id="catnav" aria-label="Categories"><div class="container"><div class="row" id="catRow"></div></div></nav>
-</header>
-
-<main id="app" class="container" tabindex="-1" aria-live="polite"></main>
-
-<footer class="footer">
-  <div class="container">
-    <div class="row between wrap">
-      <span>&copy; <span id="year"></span> <span id="footBrand">CCS shop</span></span>
-      <span class="row wrap"><a id="supportLink" href="#/support">Support</a><a id="termsLink" class="hide" href="#" rel="noopener">Terms</a><button class="btn sm" id="themeBtn2" type="button">Theme</button></span>
-    </div>
+  <div class="tg-tabs" role="tablist">
+    <button class="tg-tab active" data-view="shop" type="button">Shop</button>
+    <button class="tg-tab" data-view="orders" type="button">Orders</button>
+    <button class="tg-tab" data-view="wallet" type="button">Wallet</button>
+    <button class="tg-tab admin-only" data-view="admin" type="button" id="adminTab">Admin</button>
   </div>
-</footer>
-
-<nav class="bottomnav" aria-label="Primary">
-  <a href="#/" data-nav="home"><svg class="ico-svg" viewBox="0 0 24 24"><path d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Home</a>
-  <a href="#/shop" data-nav="shop"><svg class="ico-svg" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Shop</a>
-  <a href="#/cart" data-nav="cart"><svg class="ico-svg" viewBox="0 0 24 24"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M3 4h2.5l2.2 10.5h10.6L20.5 7H6.2"/></svg>Cart<span class="badge-count hide" id="cartCount2">0</span></a>
-  <a href="#/account" data-nav="account"><svg class="ico-svg" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>Account</a>
+  <div id="app" aria-live="polite"></div>
+</div>
+<nav class="tg-bottom" aria-label="Primary">
+  <button type="button" data-nav="shop" aria-current="page">
+    <svg class="ico" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+    Shop
+  </button>
+  <button type="button" data-nav="orders">
+    <svg class="ico" viewBox="0 0 24 24"><path d="M6 7h12l-1 12H7L6 7z"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/></svg>
+    Orders
+  </button>
+  <button type="button" data-nav="wallet">
+    <svg class="ico" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18"/><circle cx="16" cy="14" r="1.2"/></svg>
+    Wallet
+  </button>
+  <button type="button" data-nav="theme" id="themeNav">
+    <svg class="ico" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    Theme
+  </button>
 </nav>
-
-<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
-<dialog id="dlg" aria-labelledby="dlgTitle"></dialog>
-<script src="/script.js" defer></script>
-<noscript><div class="container"><p>This marketplace needs JavaScript to browse products.</p></div></noscript>
+<script nonce="{{NONCE}}" src="/app.js"></script>
 </body>
 </html>
