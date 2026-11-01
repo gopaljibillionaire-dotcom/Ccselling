@@ -1,2 +1,1 @@
-web: gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:$PORT --timeout 120 main:app
-release: python main.py init-indexes
+web: gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 2 --timeout 120 --graceful-timeout 30 --keep-alive 5
