@@ -2,7 +2,48 @@
 "use strict";
 (() => {
 const $ = (s, r = document) => r.querySelector(s);
-const state = { user: null, csrf: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0, tg: null, isTelegram: false, token: (function(){ try { return sessionStorage.getItem("tg_token"); } catch(e){ return null; } })() };
+
+/* ---------- Telegram Mini App auth ---------- */
+async function telegramAuth() {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg) return false;
+  try { tg.ready(); tg.expand(); } catch {}
+  const initData = tg.initData || "";
+  if (!initData) return false;
+  try {
+    const r = await api("/auth/telegram", { method: "POST", body: { init_data: initData } });
+    state.user = r.user;
+    state.csrf = r.csrf;
+    if (r.token) state.token = r.token;
+    state.wishlist = new Set((r.user && r.user.wishlist) || []);
+    if (r.user && r.user.theme) setTheme(r.user.theme, false);
+    renderAuthState();
+    return true;
+  } catch (e) {
+    console.warn("telegram auth failed", e);
+    return false;
+  }
+}
+
+function renderTgUser() {
+  const el = $("#tgUser");
+  if (!el) return;
+  if (!state.user) { el.classList.add("hide"); el.innerHTML = ""; return; }
+  el.classList.remove("hide");
+  const photo = state.user.photo_url
+    ? `<img src="${state.user.photo_url}" alt="" class="tg-avatar">`
+    : `<span class="tg-avatar fallback">${(state.user.name || "?").slice(0,1)}</span>`;
+  const uname = state.user.username ? "@" + state.user.username : (state.user.name || "User");
+  el.innerHTML = `${photo}<span class="tg-name">${uname}</span>`;
+  const ab = $("#adminBtn");
+  if (ab) {
+    const show = !!(state.user.is_admin || (state.user.role && ["admin","superadmin","support"].includes(state.user.role)));
+    ab.style.display = show ? "" : "none";
+    ab.classList.toggle("hide", !show);
+  }
+}
+
+const state = { user: null, csrf: null, token: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0 };
 const _homeCache = { at: 0, key: "", data: null };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -26,7 +67,7 @@ function h(tag, attrs, ...kids) {
 const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChild); return el; };
 const money = (minor, cur = state.cfg.currency) => { try { return new Intl.NumberFormat(undefined, { style: "currency", currency: cur }).format(minor / 100); } catch { return (minor / 100).toFixed(2) + " " + cur; } };
 const fmtDate = (s) => (s ? new Date(s).toLocaleString() : "");
-const safeImg = (src, alt) => { const i = h("img", { src: src || "", alt: alt || "", loading: "lazy", decoding: "async", referrerpolicy: "no-referrer" }); i.addEventListener("error", () => { i.src = "data:image/svg+xml;utf8," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='#12204a'/><text x='50' y='56' font-size='12' text-anchor='middle' fill='#9fb0d4'>No image</text></svg>"); }, { once: true }); return i; };
+const safeImg = (src, alt) => { const i = h("img", { src: src || "", alt: alt || "", loading: "lazy", decoding: "async" }); i.addEventListener("error", () => { i.src = "data:image/svg+xml;utf8," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='#12204a'/><text x='50' y='56' font-size='12' text-anchor='middle' fill='#9fb0d4'>No image</text></svg>"); }, { once: true }); return i; };
 function toast(msg, kind = "") { const t = h("div", { class: "toast " + kind, role: kind === "bad" ? "alert" : "status" }, msg); $("#toasts").append(t); setTimeout(() => t.remove(), 4500); }
 const bar = (on) => { const b = $("#loadbar"); b.style.width = on ? "70%" : "100%"; if (!on) setTimeout(() => (b.style.width = "0"), 250); };
 
@@ -35,8 +76,8 @@ class ApiError extends Error { constructor(msg, status) { super(msg); this.statu
 async function api(path, { method = "GET", body, headers = {} } = {}) {
   const opts = { method, credentials: "same-origin", headers: { Accept: "application/json", ...headers } };
   if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
-  if (method !== "GET" && state.csrf) opts.headers["X-CSRF-Token"] = state.csrf;
   if (state.token) opts.headers["Authorization"] = "Bearer " + state.token;
+  if (method !== "GET" && state.csrf) opts.headers["X-CSRF-Token"] = state.csrf;
   let res;
   try { res = await fetch("/api" + path, opts); } catch { throw new ApiError("Network problem - check your connection and retry.", 0); }
   let data = null;
@@ -160,39 +201,17 @@ const errorBox = (e, retry) => h("div", { class: "empty", role: "alert" }, h("p"
 /* ---------- Auth state ---------- */
 function renderAuthState() {
   const li = !!state.user;
-  const isStaff = !!(state.user && ["support", "admin", "superadmin"].includes(state.user.role));
-  $("#authBtn").classList.toggle("hide", li || state.isTelegram);
+  const inTg = !!(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData);
+  $("#authBtn").classList.toggle("hide", li || inTg);
   $("#acctBtn").classList.toggle("hide", !li);
   $("#notifBtn").classList.toggle("hide", !li);
   $("#cartCount").classList.toggle("hide", true);
   updateCartBadge();
-  // Admin entry — always available for staff (Telegram + web)
-  let adminBtn = document.getElementById("tgAdminBtn");
-  if (!adminBtn) {
-    adminBtn = h("a", {
-      id: "tgAdminBtn",
-      class: "btn primary hide",
-      href: "/admin",
-      target: state.isTelegram ? "_self" : "_blank",
-      rel: "noopener"
-    }, "Admin");
-    const host = document.querySelector("header .actions") || document.querySelector("header .row") || document.querySelector("header");
-    if (host) host.append(adminBtn);
-  }
-  adminBtn.classList.toggle("hide", !isStaff);
-  adminBtn.href = "/admin";
-  // Show Telegram identity chip on account button when available
-  if (li && state.user && state.user.telegram_photo_url) {
-    try {
-      const acct = $("#acctBtn");
-      if (acct && !acct.querySelector("img.tg-ava")) {
-        const img = h("img", { class: "tg-ava", src: state.user.telegram_photo_url, alt: "", style: "width:18px;height:18px;border-radius:50%;margin-right:6px;vertical-align:middle" });
-        acct.prepend(img);
-      }
-    } catch (e) {}
-  }
+  renderTgUser();
 }
-async function loadSessionasync function loadSession() {
+async function loadSession() {
+  const ok = await telegramAuth();
+  if (ok) return;
   try {
     const r = await api("/auth/me");
     state.user = r.user; state.csrf = r.csrf; state.wishlist = new Set(r.user.wishlist || []);
@@ -200,7 +219,7 @@ async function loadSessionasync function loadSession() {
   } catch { state.user = null; state.csrf = null; }
   renderAuthState();
 }
-function requireLogin(msg = "Please sign in to continue.") { if (state.user) return true; if (state.isTelegram || (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData)) { toast("Signing you in with Telegram…"); telegramLogin().then((ok) => { if (ok) route(); }); return false; } toast(msg); authDialog("login"); return false; }
+function requireLogin(msg = "Please sign in to continue.") { if (state.user) return true; toast(msg); authDialog("login"); return false; }
 
 function authDialog(mode = "login") {
   const err = h("div", { class: "error-text", role: "alert" });
@@ -694,52 +713,7 @@ function renderCountrySelect() {
   s.addEventListener("change", () => { state.country = s.value; store.set("country", s.value); route(); });
 }
 
-
-async function telegramLogin() {
-  const tg = window.Telegram && window.Telegram.WebApp;
-  if (!tg) return false;
-  let tries = 0;
-  while (!tg.initData && tries < 40) {
-    await new Promise((r) => setTimeout(r, 50));
-    tries++;
-  }
-  if (!tg.initData) {
-    // still inside telegram but no initData — show hint, don't force email login
-    if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-      toast("Telegram session incomplete — close and reopen the Mini App.", "bad");
-    }
-    return false;
-  }
-  state.isTelegram = true;
-  state.tg = tg;
-  try {
-    document.documentElement.classList.add("tg-miniapp");
-    tg.ready();
-    tg.expand();
-    if (typeof tg.disableVerticalSwipes === "function") try { tg.disableVerticalSwipes(); } catch (e) {}
-    if (tg.setHeaderColor) try { tg.setHeaderColor("secondary_bg_color"); } catch (e) {}
-    if (tg.setBackgroundColor) try { tg.setBackgroundColor("bg_color"); } catch (e) {}
-    if (tg.MainButton) try { tg.MainButton.hide(); } catch (e) {}
-  } catch (e) {}
-  try {
-    const r = await api("/auth/telegram", { method: "POST", body: { init_data: tg.initData } });
-    state.user = r.user;
-    state.csrf = r.csrf;
-    state.token = r.token || null;
-    try { if (state.token) sessionStorage.setItem("tg_token", state.token); } catch (e) {}
-    state.wishlist = new Set((r.user && r.user.wishlist) || []);
-    if (r.user && r.user.theme) setTheme(r.user.theme, false);
-    renderAuthState();
-    return true;
-  } catch (e) {
-    console.warn("Telegram auth failed", e);
-    toast(e.message || "Telegram login failed", "bad");
-    return false;
-  }
-}
-
-async function bootasync function boot() {
-
+async function boot() {
   $("#year").textContent = new Date().getFullYear();
   try { if (!localStorage.getItem("theme")) setTheme("light", false); } catch (e) { setTheme("light", false); }
   const params = new URLSearchParams(location.search);
@@ -757,10 +731,7 @@ async function bootasync function boot() {
     if (cfg.terms_url) { const a = $("#termsLink"); a.href = cfg.terms_url; a.classList.remove("hide"); a.target = "_blank"; a.rel = "noopener noreferrer"; }
     renderCatNav(); renderCountrySelect();
   } catch (e) { clear(app()).append(errorBox(e, () => location.reload())); return; }
-  const viaTg = await telegramLogin();
-  if (!viaTg) await loadSession();
-  await refreshCart();
-
+  await loadSession(); await refreshCart();
   if (params.get("reset")) { resetDialog(params.get("reset")); history.replaceState(null, "", location.pathname + location.hash); }
   const ord = params.get("order"); const back = ord && /^(ORD|DEP)-[A-F0-9]{10}$/.test(ord) ? ord : null;
   if (back) history.replaceState(null, "", location.pathname);

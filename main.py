@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
-from urllib.parse import parse_qsl, unquote, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from bson import ObjectId
@@ -75,17 +75,14 @@ async def ensure_indexes(d: Any) -> None:
     ix = lambda col, keys, **kw: d[col].create_index(keys, **kw)  # noqa: E731
     A, D = ASCENDING, DESCENDING
     await ix("users", [("email", A)], unique=True)
-    await ix("users", [("telegram_id", A)], unique=True, sparse=True)
     await ix("users", [("referral_code", A)], unique=True, sparse=True)
     await ix("users", [("reset.token_hash", A)], sparse=True)
     await ix("users", [("created_at", D)])
-    await ix("stock_units", [("product_id", A), ("sku", A), ("status", A)])
-    await ix("stock_units", [("status", A), ("created_at", D)])
-    await ix("stock_units", [("fingerprint", A)], unique=True, sparse=True)
     await ix("invitations", [("email", A)])
     await ix("invitations", [("code_hash", A)], unique=True, sparse=True)
     await ix("sessions", [("expires_at", A)], expireAfterSeconds=0)
     await ix("sessions", [("user_id", A)])
+    await ix("users", [("telegram_id", A)], unique=True, sparse=True)
     await ix("rate_limits", [("expires_at", A)], expireAfterSeconds=0)
     await ix("products", [("slug", A)], unique=True)
     await ix("products", [("name", "text"), ("short_description", "text"), ("search_blob", "text")],
@@ -309,224 +306,6 @@ def tier_for(user: dict, tiers: List[dict]) -> dict:
 # =============================================================================
 # 3. AUTH DEPENDENCIES
 # =============================================================================
-
-# =============================================================================
-# 2b. TELEGRAM MINI APP AUTH + GEMINI LINE PARSER
-# =============================================================================
-def _telegram_admin_id_set() -> set:
-    return {x.strip() for x in settings.telegram_admin_ids if x.strip()}
-
-
-def verify_telegram_webapp_init_data(init_data: str) -> dict:
-    """Validate Telegram WebApp initData per https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app."""
-    if not settings.telegram_bot_token:
-        raise HTTPException(503, "Telegram bot is not configured (TELEGRAM_BOT_TOKEN).")
-    if not init_data or not isinstance(init_data, str):
-        raise HTTPException(401, "Missing Telegram init data")
-    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
-    received_hash = pairs.pop("hash", None)
-    if not received_hash:
-        raise HTTPException(401, "Invalid Telegram init data (no hash)")
-    data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
-    secret_key = hmac.new(b"WebAppData", settings.telegram_bot_token.encode(), hashlib.sha256).digest()
-    calc = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(calc, received_hash):
-        raise HTTPException(401, "Invalid Telegram init data signature")
-    auth_date = pairs.get("auth_date")
-    try:
-        auth_ts = int(auth_date)
-    except (TypeError, ValueError):
-        raise HTTPException(401, "Invalid Telegram auth_date")
-    if abs(int(time.time()) - auth_ts) > settings.telegram_auth_max_age_seconds:
-        raise HTTPException(401, "Telegram init data expired. Re-open the Mini App.")
-    user_raw = pairs.get("user")
-    if not user_raw:
-        raise HTTPException(401, "Telegram user payload missing")
-    try:
-        user = json.loads(user_raw)
-    except json.JSONDecodeError:
-        raise HTTPException(401, "Telegram user payload invalid")
-    if not user.get("id"):
-        raise HTTPException(401, "Telegram user id missing")
-    return {"user": user, "auth_date": auth_ts, "raw": pairs}
-
-
-def telegram_role_for(tg_id: int | str) -> str:
-    if settings.telegram_auto_admin and str(tg_id) in _telegram_admin_id_set():
-        return "admin"
-    return "customer"
-
-
-async def upsert_telegram_user(tg: dict) -> dict:
-    """Create or refresh a user from Telegram profile. No password / email login required."""
-    tg_id = int(tg["id"])
-    first = (tg.get("first_name") or "").strip()
-    last = (tg.get("last_name") or "").strip()
-    username = (tg.get("username") or "").strip()
-    photo = (tg.get("photo_url") or "").strip()
-    name = (first + (" " + last if last else "")).strip() or (username and f"@{username}") or f"tg_{tg_id}"
-    role = telegram_role_for(tg_id)
-    email = f"tg{tg_id}@telegram.local"
-    now = utcnow()
-    existing = await db()["users"].find_one({"telegram_id": tg_id})
-    if existing is None:
-        existing = await db()["users"].find_one({"email": email})
-    if existing:
-        updates: Dict[str, Any] = {
-            "telegram_id": tg_id,
-            "telegram_username": username,
-            "telegram_photo_url": photo,
-            "name": name,
-            "updated_at": now,
-            "last_login_at": now,
-        }
-        # elevate if admin id list includes them; never auto-demote superadmin
-        if role == "admin" and ROLE_LEVEL.get(existing.get("role", "customer"), 0) < ROLE_LEVEL["admin"]:
-            updates["role"] = "admin"
-        await db()["users"].update_one({"_id": existing["_id"]}, {"$set": updates})
-        user = await db()["users"].find_one({"_id": existing["_id"]})
-    else:
-        doc = {
-            "email": email,
-            "email_lc": email,
-            "password_hash": None,
-            "name": name,
-            "role": role,
-            "status": "active",
-            "telegram_id": tg_id,
-            "telegram_username": username,
-            "telegram_photo_url": photo,
-            "theme": "dark",
-            "points_balance": 0,
-            "lifetime_spend_minor": 0,
-            "created_at": now,
-            "updated_at": now,
-            "last_login_at": now,
-            "accept_terms_at": now,
-        }
-        res = await db()["users"].insert_one(doc)
-        user = await db()["users"].find_one({"_id": res.inserted_id})
-        await db()["wallet_accounts"].update_one(
-            {"user_id": user["_id"]},
-            {"$setOnInsert": {"user_id": user["_id"], "balance_minor": 0, "currency": settings.default_currency, "created_at": utcnow()}},
-            upsert=True,
-        )
-    return user
-
-
-async def gemini_parse_card_lines(raw_text: str) -> List[dict]:
-    """Use Gemini to normalise free-form lines into structured card rows.
-
-    Expected output fields per line:
-    cc | exp | cvv | address | city | state | zip | country | extra
-    """
-    if not settings.gemini_api_key:
-        # local deterministic fallback parser
-        return local_parse_card_lines(raw_text)
-    prompt = (
-        "You parse card inventory lines for a marketplace. "
-        "Each input line may be messy. Return ONLY a JSON array of objects with keys: "
-        "cc, exp, cvv, address, city, state, zip, country, extra. "
-        "exp should be MM/YY or MM/YYYY when possible. "
-        "Omit empty strings rather than inventing data. "
-        "If a line is not a card row, skip it. Input:\n\n" + raw_text[:120000]
-    )
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
-    )
-    body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
-    }
-    assert S.http is not None
-    try:
-        r = await S.http.post(url, json=body, timeout=60.0)
-        data = r.json()
-    except Exception as exc:
-        log.error("Gemini request failed: %s", exc)
-        return local_parse_card_lines(raw_text)
-    try:
-        text_out = data["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(text_out)
-        if isinstance(parsed, dict) and "items" in parsed:
-            parsed = parsed["items"]
-        if not isinstance(parsed, list):
-            raise ValueError("not a list")
-        out = []
-        for row in parsed:
-            if not isinstance(row, dict):
-                continue
-            cc = re.sub(r"\D", "", str(row.get("cc") or ""))
-            if len(cc) < 12:
-                continue
-            out.append({
-                "cc": cc,
-                "exp": str(row.get("exp") or "").strip(),
-                "cvv": str(row.get("cvv") or "").strip(),
-                "address": str(row.get("address") or "").strip(),
-                "city": str(row.get("city") or "").strip(),
-                "state": str(row.get("state") or "").strip(),
-                "zip": str(row.get("zip") or "").strip(),
-                "country": str(row.get("country") or "").strip(),
-                "extra": str(row.get("extra") or "").strip(),
-            })
-        return out or local_parse_card_lines(raw_text)
-    except Exception as exc:
-        log.error("Gemini parse failed: %s body=%s", exc, json.dumps(data)[:400])
-        return local_parse_card_lines(raw_text)
-
-
-def local_parse_card_lines(raw_text: str) -> List[dict]:
-    """Fallback pipe/comma/tab splitter without Gemini."""
-    out: List[dict] = []
-    for line in (raw_text or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "|" in line:
-            parts = [p.strip() for p in line.split("|")]
-        elif "\t" in line:
-            parts = [p.strip() for p in line.split("\t")]
-        else:
-            parts = [p.strip() for p in re.split(r"\s{2,}|,", line)]
-        while len(parts) < 9:
-            parts.append("")
-        cc = re.sub(r"\D", "", parts[0])
-        if len(cc) < 12:
-            continue
-        out.append({
-            "cc": cc,
-            "exp": parts[1],
-            "cvv": parts[2],
-            "address": parts[3],
-            "city": parts[4],
-            "state": parts[5],
-            "zip": parts[6],
-            "country": parts[7],
-            "extra": " | ".join(p for p in parts[8:] if p),
-        })
-    return out
-
-
-def unit_fingerprint(cc: str, exp: str, cvv: str) -> str:
-    base = f"{cc}|{exp}|{cvv}".encode()
-    return hashlib.sha256(base).hexdigest()
-
-
-def unit_to_delivery_fields(u: dict) -> List[dict]:
-    fields = [
-        {"label": "CC", "value": u.get("cc", ""), "kind": "text"},
-        {"label": "EXP", "value": u.get("exp", ""), "kind": "text"},
-        {"label": "CVV", "value": u.get("cvv", ""), "kind": "text"},
-    ]
-    for lab, key in (("Address", "address"), ("City", "city"), ("State", "state"), ("ZIP", "zip"), ("Country", "country"), ("Extra", "extra")):
-        val = (u.get(key) or "").strip()
-        if val:
-            fields.append({"label": lab, "value": val, "kind": "text"})
-    return fields
-
-
 async def get_session(request: Request) -> Optional[dict]:
     if getattr(request.state, "session_loaded", False):
         return request.state.session
@@ -534,17 +313,15 @@ async def get_session(request: Request) -> Optional[dict]:
     auth = request.headers.get("authorization", "")
     if auth[:7].lower() == "bearer ":
         token = auth[7:].strip()
-        via_cookie = False
     else:
-        token = request.cookies.get(settings.cookie_name)
-        via_cookie = bool(token)
+        token, via_cookie = request.cookies.get(settings.cookie_name), True
     sess = await S.sessions.resolve(token) if (token and S.sessions) else None
     request.state.session_loaded, request.state.session = True, sess
     request.state.via_cookie, request.state.token = via_cookie, token
     return sess
 
 
-EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook", "/api/telegram/webhook", "/api/telegram/setup"}
+EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook"}
 
 
 async def api_rate_limit(request: Request) -> None:
@@ -577,7 +354,12 @@ async def optional_user(request: Request) -> Optional[dict]:
 
 def require_role(minimum: str):
     async def dep(request: Request, user: dict = Depends(current_user)) -> dict:
-        if ROLE_LEVEL.get(user.get("role", "customer"), 0) < ROLE_LEVEL[minimum]:
+        role = user.get("role", "customer")
+        tg_id = str(user.get("telegram_id") or "")
+        if tg_id and tg_id in set(settings.telegram_admin_ids):
+            role = "admin" if ROLE_LEVEL.get(role, 0) < ROLE_LEVEL["admin"] else role
+            user = {**user, "role": role}
+        if ROLE_LEVEL.get(role, 0) < ROLE_LEVEL[minimum]:
             await audit(request, "authz.denied", user["_id"], meta={"path": request.url.path}, category="security", level="warn")
             raise HTTPException(403, "Insufficient permissions")
         return user
@@ -1482,43 +1264,15 @@ async def claim_flag(order_id: ObjectId, flag: str) -> Optional[dict]:
 
 
 async def issue_delivery(order: dict) -> None:
-    """Assign unique stock units when available; otherwise fall back to product delivery_fields snapshot."""
+    """Snapshot each product's delivery placeholders onto the order so the buyer can see them (and they never change later)."""
+    ids = [it["product_id"] for it in order["items"]]
+    prods = {p["_id"]: p async for p in db()["products"].find({"_id": {"$in": ids}}, {"delivery_fields": 1, "name": 1})}
     deliveries = []
     for it in order["items"]:
-        pid, sku, qty = it["product_id"], it["sku"], int(it["qty"])
-        assigned = []
-        for _ in range(qty):
-            unit = await db()["stock_units"].find_one_and_update(
-                {"product_id": pid, "sku": sku, "status": "available"},
-                {"$set": {"status": "sold", "sold_order_id": order["_id"], "sold_at": utcnow()}},
-                return_document=ReturnDocument.AFTER,
-            )
-            if unit:
-                assigned.append(unit)
-            else:
-                break
-        if assigned:
-            for u in assigned:
-                deliveries.append({
-                    "product_id": str(pid),
-                    "name": it["name"],
-                    "variant_label": it.get("variant_label", ""),
-                    "qty": 1,
-                    "unit_id": str(u["_id"]),
-                    "fields": unit_to_delivery_fields(u),
-                })
-            continue
-        # fallback: static product delivery placeholders
-        prod = await db()["products"].find_one({"_id": pid}, {"delivery_fields": 1, "name": 1})
-        fields = (prod or {}).get("delivery_fields") or []
+        fields = (prods.get(it["product_id"]) or {}).get("delivery_fields") or []
         if fields:
-            deliveries.append({
-                "product_id": str(pid),
-                "name": it["name"],
-                "variant_label": it.get("variant_label", ""),
-                "qty": qty,
-                "fields": [{"label": f["label"], "value": f["value"], "kind": f.get("kind", "text")} for f in fields],
-            })
+            deliveries.append({"product_id": str(it["product_id"]), "name": it["name"], "variant_label": it.get("variant_label", ""), "qty": it["qty"],
+                               "fields": [{"label": f["label"], "value": f["value"], "kind": f.get("kind", "text")} for f in fields]})
     await db()["orders"].update_one({"_id": order["_id"]}, {"$set": {"deliveries": deliveries, "fulfillment_status": "delivered", "delivered_at": utcnow()}})
 
 
@@ -1666,24 +1420,35 @@ async def captcha_check(token: str, answer: str) -> None:
 
 
 def set_session_cookie(response: Response, token: str) -> None:
-    # Telegram WebView often needs SameSite=None; Secure required with None
-    samesite = settings.cookie_samesite
-    secure = settings.cookie_secure
-    if settings.telegram_enabled and samesite != "none":
-        samesite = "none"
-        secure = True
     response.set_cookie(settings.cookie_name, token, max_age=settings.session_ttl_hours * 3600, httponly=True,
-                        secure=secure, samesite=samesite, path="/")
+                        secure=settings.cookie_secure, samesite=settings.cookie_samesite, path="/")
 
 
 def me_payload(user: dict, tiers: List[dict]) -> dict:
     tier = tier_for(user, tiers)
-    return {"id": str(user["_id"]), "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "customer"),
-            "country": user.get("country"), "theme": user.get("theme"), "notifications": user.get("notifications", {}),
-            "tier": {"key": tier["key"], "name": tier["name"]}, "points_balance": user.get("points_balance", 0),
-            "referral_code": user.get("referral_code"), "wishlist": [str(x) for x in user.get("wishlist", [])], "created_at": iso(user.get("created_at")),
-            "telegram_id": user.get("telegram_id"), "telegram_username": user.get("telegram_username"),
-            "telegram_photo_url": user.get("telegram_photo_url")}
+    tg_id = str(user.get("telegram_id") or "")
+    is_tg_admin = bool(tg_id and tg_id in set(settings.telegram_admin_ids))
+    role = user.get("role", "customer")
+    if is_tg_admin and ROLE_LEVEL.get(role, 0) < ROLE_LEVEL["admin"]:
+        role = "admin"
+    return {
+        "id": str(user["_id"]),
+        "email": user.get("email") or "",
+        "name": user.get("name", ""),
+        "role": role,
+        "is_admin": is_tg_admin or ROLE_LEVEL.get(role, 0) >= ROLE_LEVEL["admin"],
+        "telegram_id": tg_id or None,
+        "photo_url": user.get("photo_url") or None,
+        "username": user.get("telegram_username") or None,
+        "country": user.get("country"),
+        "theme": user.get("theme"),
+        "notifications": user.get("notifications", {}),
+        "tier": {"key": tier["key"], "name": tier["name"]},
+        "points_balance": user.get("points_balance", 0),
+        "referral_code": user.get("referral_code"),
+        "wishlist": [str(x) for x in user.get("wishlist", [])],
+        "created_at": iso(user.get("created_at")),
+    }
 
 
 @api.get("/health")
@@ -1697,6 +1462,325 @@ async def health() -> dict:
             ok = False
     return {"status": "ok" if ok else "degraded", "database": "up" if ok else "down", "payments_configured": settings.plisio_enabled,
             "uploads_configured": settings.imgbb_enabled, "environment": settings.app_env}
+
+
+
+# ---- telegram mini app auth -------------------------------------------------
+class TelegramAuthIn(Strict):
+    init_data: str = Field(min_length=10, max_length=4096)
+
+
+def _parse_telegram_init_data(init_data: str) -> dict:
+    """Validate Telegram WebApp initData (HMAC-SHA256) and return parsed user dict."""
+    token = settings.telegram_bot_token
+    if not token:
+        raise HTTPException(503, "TELEGRAM_BOT_TOKEN is not configured")
+    from urllib.parse import parse_qsl, unquote_plus
+    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+    recv_hash = pairs.pop("hash", None)
+    if not recv_hash:
+        raise HTTPException(401, "Missing Telegram hash")
+    data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+    calc = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc, recv_hash):
+        raise HTTPException(401, "Invalid Telegram initData signature")
+    auth_date = int(pairs.get("auth_date") or 0)
+    if abs(int(time.time()) - auth_date) > 86400:
+        raise HTTPException(401, "Telegram initData expired")
+    user_raw = pairs.get("user")
+    if not user_raw:
+        raise HTTPException(401, "Telegram user missing")
+    try:
+        user = json.loads(user_raw)
+    except Exception:
+        raise HTTPException(401, "Telegram user payload invalid")
+    if not user.get("id"):
+        raise HTTPException(401, "Telegram user id missing")
+    return user
+
+
+@api.post("/auth/telegram")
+async def auth_telegram(body: TelegramAuthIn, request: Request, response: Response) -> dict:
+    """Silent login via Telegram Mini App initData. No email/password."""
+    tg = _parse_telegram_init_data(body.init_data)
+    tg_id = str(tg["id"])
+    name = " ".join(x for x in [tg.get("first_name") or "", tg.get("last_name") or ""] if x).strip() or (tg.get("username") or f"tg_{tg_id}")
+    username = (tg.get("username") or "")[:64]
+    photo = (tg.get("photo_url") or "")[:500]
+    is_admin = tg_id in set(settings.telegram_admin_ids)
+    role = "admin" if is_admin else "customer"
+
+    user = await db()["users"].find_one({"telegram_id": tg_id})
+    now = utcnow()
+    if not user:
+        # also try legacy email key for same tg
+        user = {
+            "telegram_id": tg_id,
+            "telegram_username": username,
+            "photo_url": photo,
+            "email": f"tg_{tg_id}@telegram.local",
+            "name": name[:80],
+            "password_hash": sec.hash_password(secrets.token_urlsafe(32)),
+            "role": role,
+            "status": "active",
+            "created_at": now,
+            "lifetime_spend_minor": 0,
+            "points_balance": 0,
+            "referral_code": secrets.token_hex(4).upper(),
+            "wishlist": [],
+            "notifications": {"orders": True, "promotions": False},
+            "theme": None,
+            "country": None,
+        }
+        res = await db()["users"].insert_one(user)
+        user["_id"] = res.inserted_id
+    else:
+        updates = {
+            "name": name[:80],
+            "telegram_username": username,
+            "photo_url": photo,
+            "last_login_at": now,
+        }
+        if is_admin and user.get("role") not in STAFF_ROLES:
+            updates["role"] = "admin"
+        elif not is_admin and user.get("role") in STAFF_ROLES and str(user.get("telegram_id")) not in set(settings.telegram_admin_ids):
+            # keep existing staff if they were promoted manually; only force admin when listed
+            pass
+        await db()["users"].update_one({"_id": user["_id"]}, {"$set": updates})
+        user = await db()["users"].find_one({"_id": user["_id"]})
+
+    # rotate any existing cookie session
+    await S.sessions.revoke(request.cookies.get(settings.cookie_name))
+    token, sess = await S.sessions.create(user, request)
+    set_session_cookie(response, token)
+    await audit(request, "auth.telegram", user["_id"], category="security", meta={"telegram_id": tg_id, "is_admin": is_admin})
+    return {
+        "user": me_payload(user, await get_tiers()),
+        "csrf": sess["csrf"],
+        "token": token,
+        "is_admin": is_admin,
+    }
+
+
+class BulkProductLine(Strict):
+    """One raw product line before Gemini normalisation."""
+    raw: str = Field(min_length=5, max_length=2000)
+
+
+class BulkProductsIn(Strict):
+    """Paste many lines: cc | exp | cvv | address | city | state | zip | country | extra"""
+    text: str = Field(min_length=5, max_length=500_000)
+    price: str = Field(default="10.00")
+    category_id: Optional[str] = None
+    status: Literal["draft", "published"] = "published"
+    default_country: str = Field(default="US", min_length=2, max_length=2)
+
+
+def _split_bulk_lines(text: str) -> List[str]:
+    lines = []
+    for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        lines.append(ln)
+    return lines
+
+
+def _parse_pipe_line(line: str) -> dict:
+    parts = [p.strip() for p in line.split("|")]
+    while len(parts) < 9:
+        parts.append("")
+    keys = ["cc", "exp", "cvv", "address", "city", "state", "zip", "country", "extra"]
+    return {k: parts[i] for i, k in enumerate(keys)}
+
+
+async def _gemini_normalize_rows(rows: List[dict]) -> List[dict]:
+    """Use Gemini to clean country codes, fill missing fields, produce short product names."""
+    if not settings.gemini_api_key:
+        return _local_normalize_rows(rows)
+
+    prompt = (
+        "You normalise bulk card-product rows for a private inventory tool. "
+        "Input is JSON array of objects with keys: cc, exp, cvv, address, city, state, zip, country, extra. "
+        "Return ONLY a JSON array (no markdown) of objects with keys: "
+        "cc, exp, cvv, address, city, state, zip, country (ISO-3166 alpha-2), extra, name (short product title). "
+        "Rules: country must be valid 2-letter code; guess from city/state/zip when missing; "
+        "name like 'US Visa 414720' using first 6 digits of cc and country; keep original secrets intact; "
+        "do not invent card numbers. Input:\n" + json.dumps(rows[:120], ensure_ascii=False)
+    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+    }
+    try:
+        assert S.http is not None
+        resp = await S.http.post(url, json=payload, timeout=60.0)
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        # strip accidental fences
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text)
+        if not isinstance(parsed, list):
+            raise ValueError("not a list")
+        return parsed
+    except Exception as exc:
+        log.warning("gemini bulk normalize failed: %s", type(exc).__name__)
+        return _local_normalize_rows(rows)
+
+
+def _local_normalize_rows(rows: List[dict]) -> List[dict]:
+    out = []
+    for r in rows:
+        country = (r.get("country") or "US").upper()[:2]
+        if len(country) != 2 or not country.isalpha():
+            country = "US"
+        cc = re.sub(r"\D", "", str(r.get("cc") or ""))
+        name = f"{country} • {(cc[:6] + '******') if len(cc) >= 6 else 'CARD'}"
+        out.append({**r, "country": country, "name": name, "cc": cc or r.get("cc", "")})
+    return out
+
+
+async def _gemini_normalize_rows_safe(rows: List[dict]) -> List[dict]:
+    try:
+        return await _gemini_normalize_rows(rows)
+    except Exception:
+        return _local_normalize_rows(rows)
+
+
+@admin.post("/products/bulk")
+async def admin_products_bulk(body: BulkProductsIn, request: Request, user: dict = Depends(admin_user)) -> dict:
+    """Parse pasted pipe-delimited inventory, optionally enrich with Gemini, insert products."""
+    lines = _split_bulk_lines(body.text)
+    if not lines:
+        raise HTTPException(422, "No product lines found")
+    if len(lines) > 500:
+        raise HTTPException(422, "Max 500 lines per bulk upload")
+
+    raw_rows = [_parse_pipe_line(ln) for ln in lines]
+    # chunk Gemini calls
+    normalized: List[dict] = []
+    for i in range(0, len(raw_rows), 80):
+        chunk = await _gemini_normalize_rows_safe(raw_rows[i : i + 80])
+        normalized.extend(chunk)
+
+    # ensure category
+    cat_id = None
+    if body.category_id:
+        cat_id = oid(body.category_id, "category_id")
+    else:
+        cat = await db()["categories"].find_one({"name": {"$regex": "^cards?$", "$options": "i"}})
+        if not cat:
+            cat = {"name": "Cards", "slug": "cards", "enabled": True, "featured": True, "order": 0, "created_at": utcnow()}
+            ins = await db()["categories"].insert_one(cat)
+            cat["_id"] = ins.inserted_id
+        cat_id = cat["_id"]
+
+    ctx = await catalog_ctx()
+    price_minor = money_to_minor(body.price, "Price", allow_zero=False)
+    created = []
+    errors = []
+    for idx, row in enumerate(normalized):
+        try:
+            country = str(row.get("country") or body.default_country).upper()[:2]
+            if country not in ctx["countries"]:
+                # auto-enable unknown country entry
+                await db()["countries"].update_one(
+                    {"code": country},
+                    {"$setOnInsert": {"code": country, "name": country, "region": "", "enabled": True, "order": 999}},
+                    upsert=True,
+                )
+                invalidate_cache()
+                ctx = await catalog_ctx()
+
+            cc = str(row.get("cc") or "").strip()
+            exp = str(row.get("exp") or "").strip()
+            cvv = str(row.get("cvv") or "").strip()
+            address = str(row.get("address") or "").strip()
+            city = str(row.get("city") or "").strip()
+            state = str(row.get("state") or "").strip()
+            zipc = str(row.get("zip") or "").strip()
+            extra = str(row.get("extra") or "").strip()
+            name = sec.clean_text(str(row.get("name") or f"{country} CARD"), 140)
+            digits = re.sub(r"\D", "", cc)
+            delivery = [
+                {"label": "CC", "value": cc, "kind": "secret"},
+                {"label": "EXP", "value": exp, "kind": "text"},
+                {"label": "CVV", "value": cvv, "kind": "secret"},
+            ]
+            if address:
+                delivery.append({"label": "Address", "value": address, "kind": "text"})
+            if city:
+                delivery.append({"label": "City", "value": city, "kind": "text"})
+            if state:
+                delivery.append({"label": "State", "value": state, "kind": "text"})
+            if zipc:
+                delivery.append({"label": "ZIP", "value": zipc, "kind": "text"})
+            if extra:
+                delivery.append({"label": "Extra", "value": extra, "kind": "text"})
+
+            slug_base = slugify(f"{country}-{digits[:6] if digits else 'card'}-{secrets.token_hex(3)}")
+            doc = {
+                "name": name,
+                "name_lc": name.lower(),
+                "slug": slug_base,
+                "short_description": f"{country} · {mask_cc_value('cc', cc)}",
+                "description": extra or f"{city} {state} {zipc}".strip(),
+                "price_minor": price_minor,
+                "discount_percent": 0,
+                "final_price_minor": price_minor,
+                "country": country,
+                "category_id": cat_id,
+                "subcategory": "",
+                "images": [],
+                "variants": [{"sku": "DEFAULT", "label": "Standard", "price_minor": None, "stock": 1, "available": 1, "reserved": 0, "sold": 0}],
+                "low_stock_threshold": 0,
+                "fields": {
+                    "bin": digits[:6] if len(digits) >= 6 else digits,
+                    "exp": exp,
+                    "city": city,
+                    "state": state,
+                    "zip": zipc,
+                },
+                "tags": [country, "bulk"],
+                "featured": False,
+                "status": body.status,
+                "delivery_info": "Instant digital delivery after payment.",
+                "refund_policy": "",
+                "delivery_fields": delivery,
+                "search_blob": " ".join([name, country, digits[:6], city, state]),
+                "sold_total": 0,
+                "rating_sum": 0,
+                "rating_count": 0,
+                "created_by": user["_id"],
+                "created_at": utcnow(),
+                "updated_at": utcnow(),
+            }
+            res = await db()["products"].insert_one(doc)
+            await log_movement(res.inserted_id, "DEFAULT", "initial", 1, 1, 0, "bulk import", user["_id"])
+            created.append({"id": str(res.inserted_id), "name": name, "country": country})
+        except Exception as exc:
+            errors.append({"line": idx + 1, "error": str(exc)[:200]})
+
+    await audit(request, "product.bulk_create", user["_id"], meta={"created": len(created), "errors": len(errors)})
+    invalidate_cache()
+    return {"created": len(created), "errors": errors, "items": created[:50]}
+
+
+@admin.delete("/products/{pid}/hard")
+async def admin_product_hard_delete(pid: str, request: Request, user: dict = Depends(admin_user)) -> dict:
+    """Permanently remove a product (not just archive)."""
+    p = await db()["products"].find_one({"_id": oid(pid)})
+    if not p:
+        raise HTTPException(404, "Product not found")
+    await db()["products"].delete_one({"_id": p["_id"]})
+    await audit(request, "product.hard_delete", user["_id"], pid)
+    invalidate_cache()
+    return {"ok": True}
 
 
 @api.get("/config")
@@ -1740,177 +1824,6 @@ async def get_captcha_svg(response: Response) -> Response:
     return Response(svg, media_type="image/svg+xml", headers={"Cache-Control": "no-store", "X-Captcha-Id": c["id"]})
 
 
-
-
-
-
-class TelegramAuthIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    init_data: str = Field(min_length=20, max_length=8192)
-
-
-@api.post("/auth/telegram")
-async def auth_telegram(body: TelegramAuthIn, request: Request, response: Response) -> dict:
-    """Login / register from Telegram Mini App initData. No email/password."""
-    await S.limiter.enforce("tg_auth", sec.client_ip(request), 30, 60)
-    verified = verify_telegram_webapp_init_data(body.init_data)
-    user = await upsert_telegram_user(verified["user"])
-    if user.get("status") != "active":
-        raise HTTPException(403, "Account is not active")
-    await S.sessions.revoke(request.cookies.get(settings.cookie_name))
-    token, sess = await S.sessions.create(user, request)
-    set_session_cookie(response, token)
-    await audit(request, "auth.telegram", user["_id"], meta={"telegram_id": user.get("telegram_id")}, category="security")
-    payload = me_payload(user, await get_tiers())
-    payload["telegram"] = {
-        "id": user.get("telegram_id"),
-        "username": user.get("telegram_username"),
-        "photo_url": user.get("telegram_photo_url"),
-        "is_admin": ROLE_LEVEL.get(user.get("role", "customer"), 0) >= ROLE_LEVEL["admin"],
-    }
-    return {"user": payload, "csrf": sess["csrf"], "token": token}
-
-
-class BulkUnitsIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    product_id: str
-    sku: str = Field(pattern=r"^[A-Za-z0-9_\-]{1,40}$")
-    raw_text: str = Field(min_length=5, max_length=500_000)
-    use_gemini: bool = True
-
-
-
-async def telegram_bot_api(method: str, payload: Optional[dict] = None) -> dict:
-    if not settings.telegram_bot_token:
-        raise HTTPException(503, "TELEGRAM_BOT_TOKEN not configured")
-    assert S.http is not None
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/{method}"
-    r = await S.http.post(url, json=payload or {})
-    data = r.json()
-    if not data.get("ok"):
-        log.error("telegram API %s failed: %s", method, data)
-        raise HTTPException(502, f"Telegram API error: {data.get('description', 'unknown')}")
-    return data.get("result") or {}
-
-
-async def tg_send_message(chat_id: int | str, text: str, reply_markup: Optional[dict] = None) -> None:
-    body: Dict[str, Any] = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    if reply_markup:
-        body["reply_markup"] = reply_markup
-    try:
-        await telegram_bot_api("sendMessage", body)
-    except Exception as exc:
-        log.error("tg_send_message failed: %s", exc)
-
-
-def miniapp_keyboard() -> dict:
-    """Reply keyboard / inline button that opens the Mini App."""
-    url = settings.public_app_url
-    return {
-        "inline_keyboard": [[
-            {"text": "🛒 Open Shop", "web_app": {"url": url}},
-        ], [
-            {"text": "🛠 Admin Panel", "web_app": {"url": url.rstrip("/") + "/admin"}},
-        ]]
-    }
-
-
-@api.post("/telegram/webhook")
-async def telegram_webhook(request: Request) -> dict:
-    """Receive Bot API updates. Always return 200 so Telegram does not retry forever."""
-    try:
-        update = await request.json()
-    except Exception:
-        return {"ok": True}
-    try:
-        msg = update.get("message") or update.get("edited_message") or {}
-        chat = msg.get("chat") or {}
-        chat_id = chat.get("id")
-        text = (msg.get("text") or "").strip()
-        from_user = msg.get("from") or {}
-        if not chat_id:
-            # callback_query etc.
-            cq = update.get("callback_query") or {}
-            if cq:
-                chat_id = (cq.get("message") or {}).get("chat", {}).get("id")
-                text = cq.get("data") or ""
-            if not chat_id:
-                return {"ok": True}
-        low = text.lower()
-        if low.startswith("/start") or low in ("start", "menu", "shop", "/shop"):
-            name = (from_user.get("first_name") or "there").replace("<", "")
-            is_admin = str(from_user.get("id")) in {x.strip() for x in settings.telegram_admin_ids if x.strip()}
-            body = (
-                f"Hey {name} 👋\n\n"
-                f"Welcome to <b>{settings.brand_name}</b>.\n"
-                "Use our Mini App to browse, buy CCS, manage wallet and orders.\n\n"
-                "Tap <b>Open Shop</b> below to get started."
-            )
-            if is_admin:
-                body += "\n\n🛠 You have <b>admin</b> access — use Admin Panel to add stock."
-            await tg_send_message(chat_id, body, miniapp_keyboard())
-        elif low.startswith("/admin"):
-            if str(from_user.get("id")) in {x.strip() for x in settings.telegram_admin_ids if x.strip()}:
-                await tg_send_message(chat_id, "Open the admin panel:", {
-                    "inline_keyboard": [[{"text": "🛠 Admin Panel", "web_app": {"url": settings.public_app_url.rstrip('/') + '/admin'}}]]
-                })
-            else:
-                await tg_send_message(chat_id, "You are not on the admin list.")
-        elif low.startswith("/help"):
-            await tg_send_message(chat_id, "Commands:\n/start – open shop\n/admin – admin panel (staff only)\n/help – this message", miniapp_keyboard())
-        else:
-            # any other message → nudge to mini app
-            await tg_send_message(chat_id, "Open the shop from the button below.", miniapp_keyboard())
-    except Exception as exc:
-        log.exception("telegram webhook handler error: %s", exc)
-    return {"ok": True}
-
-
-@api.post("/telegram/setup")
-async def telegram_setup(request: Request, user: dict = Depends(admin_user)) -> dict:
-    """Set webhook + bot commands. Call once after deploy (admin session required)."""
-    if not settings.telegram_bot_token:
-        raise HTTPException(503, "TELEGRAM_BOT_TOKEN missing")
-    webhook_url = settings.public_app_url.rstrip("/") + "/api/telegram/webhook"
-    result = await telegram_bot_api("setWebhook", {
-        "url": webhook_url,
-        "allowed_updates": ["message", "callback_query"],
-        "drop_pending_updates": True,
-    })
-    await telegram_bot_api("setMyCommands", {
-        "commands": [
-            {"command": "start", "description": "Open the shop"},
-            {"command": "admin", "description": "Admin panel"},
-            {"command": "help", "description": "Help"},
-        ]
-    })
-    # Menu button → Mini App
-    try:
-        await telegram_bot_api("setChatMenuButton", {
-            "menu_button": {
-                "type": "web_app",
-                "text": "Shop",
-                "web_app": {"url": settings.public_app_url},
-            }
-        })
-    except Exception as exc:
-        log.warning("setChatMenuButton failed: %s", exc)
-    await audit(request, "telegram.setup", user["_id"], meta={"webhook": webhook_url})
-    return {"ok": True, "webhook_url": webhook_url, "setWebhook": result}
-
-
-@api.get("/telegram/status")
-async def telegram_status(user: dict = Depends(admin_user)) -> dict:
-    if not settings.telegram_bot_token:
-        return {"configured": False}
-    info = await telegram_bot_api("getWebhookInfo")
-    me = await telegram_bot_api("getMe")
-    return {"configured": True, "bot": me, "webhook": info}
 
 
 
@@ -2255,13 +2168,8 @@ async def home(country: str = "") -> dict:
             {"$match": {"status": "published", "rating_count": {"$gt": 0}}},
             {"$group": {"_id": None, "sum": {"$sum": "$rating_sum"}, "cnt": {"$sum": "$rating_count"}}},
         ]
+        agg = await db()["products"].aggregate(pipe).to_list(1)
         avg_review = None
-        try:
-            cursor = await db()["products"].aggregate(pipe)
-            agg = await cursor.to_list(1)
-        except TypeError:
-            # driver already returned a cursor (not a coroutine)
-            agg = await db()["products"].aggregate(pipe).to_list(1)
         if agg and agg[0].get("cnt"):
             avg_review = round(float(agg[0]["sum"]) / float(agg[0]["cnt"]), 2)
         # Match admin overview: total customers + completed orders (attractive social proof)
@@ -2632,13 +2540,7 @@ async def admin_stats(user: dict = Depends(staff)) -> dict:
     c = lambda col, q: db()[col].count_documents(q)  # noqa: E731
     low_q = {"status": "published", "$expr": {"$anyElementTrue": {"$map": {"input": "$variants", "as": "v", "in": {"$and": [{"$gt": ["$$v.available", 0]}, {"$lte": ["$$v.available", "$low_stock_threshold"]}]}}}}}
     out_q = {"status": "published", "$expr": {"$lte": [{"$sum": "$variants.available"}, 0]}}
-    rev_cur = await db()["orders"].aggregate([{"$match": {"status": {"$in": ["paid", "refunded"]}}}, {"$group": {"_id": None, "rev": {"$sum": "$total_minor"}, "ref": {"$sum": "$refund_total_minor"}}}])
-    try:
-        rev = await rev_cur.to_list(1)
-    except TypeError:
-        rev = await rev_cur  # already list-like
-        if not isinstance(rev, list):
-            rev = await rev.to_list(1)
+    rev = await (await db()["orders"].aggregate([{"$match": {"status": {"$in": ["paid", "refunded"]}}}, {"$group": {"_id": None, "rev": {"$sum": "$total_minor"}, "ref": {"$sum": "$refund_total_minor"}}}])).to_list(1)
     since = utcnow() - timedelta(days=30)
     return {"currency": settings.default_currency, "customers_total": await c("users", {"role": "customer"}),
             "customers_active": await c("sessions", {"kind": "full", "last_seen": {"$gt": since}}), "products_published": await c("products", {"status": "published"}),
@@ -2828,53 +2730,6 @@ async def admin_schema_effective(category_id: Optional[str] = None, user: dict =
 
 
 # ---- inventory ---------------------------------------------------------------------
-
-@admin.get("/users/by-telegram/{tg_id}")
-async def admin_user_by_telegram(tg_id: str, user: dict = Depends(staff)) -> dict:
-    """Lookup marketplace user by Telegram numeric id."""
-    try:
-        tid = int(str(tg_id).strip())
-    except ValueError:
-        raise HTTPException(422, "telegram id must be numeric")
-    u = await db()["users"].find_one({"telegram_id": tid})
-    if not u:
-        raise HTTPException(404, "No user with that Telegram id")
-    return {
-        "id": str(u["_id"]),
-        "telegram_id": u.get("telegram_id"),
-        "telegram_username": u.get("telegram_username"),
-        "telegram_photo_url": u.get("telegram_photo_url"),
-        "name": u.get("name"),
-        "email": u.get("email"),
-        "role": u.get("role"),
-        "status": u.get("status"),
-        "points_balance": u.get("points_balance", 0),
-        "lifetime_spend_minor": u.get("lifetime_spend_minor", 0),
-        "created_at": iso(u.get("created_at")),
-        "last_login_at": iso(u.get("last_login_at")),
-    }
-
-
-@admin.get("/users/telegram")
-async def admin_list_telegram_users(page: int = Query(1, ge=1, le=500), user: dict = Depends(staff)) -> dict:
-    """List users who authenticated via Telegram."""
-    flt = {"telegram_id": {"$exists": True, "$ne": None}}
-    total = await db()["users"].count_documents(flt)
-    rows = []
-    async for u in db()["users"].find(flt).sort("last_login_at", -1).skip((page - 1) * 50).limit(50):
-        rows.append({
-            "id": str(u["_id"]),
-            "telegram_id": u.get("telegram_id"),
-            "telegram_username": u.get("telegram_username"),
-            "name": u.get("name"),
-            "role": u.get("role"),
-            "status": u.get("status"),
-            "photo_url": u.get("telegram_photo_url"),
-            "last_login_at": iso(u.get("last_login_at")),
-        })
-    return {"total": total, "users": rows}
-
-
 @admin.get("/inventory")
 async def admin_inventory(q: str = "", page: int = Query(1, ge=1, le=500), user: dict = Depends(staff)) -> dict:
     flt: Dict[str, Any] = {"status": {"$ne": "archived"}}
@@ -2931,76 +2786,6 @@ async def admin_inventory_export(request: Request, user: dict = Depends(admin_us
             w.writerow([str(p["_id"]), ("'" + name) if name[:1] in "=+-@" else name, v["sku"], v["stock"], v.get("available", 0), v.get("sold", 0)])
     await audit(request, "inventory.export", user["_id"], category="inventory")
     return Response(buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="inventory.csv"'})
-
-
-
-@admin.post("/inventory/units/bulk")
-async def admin_inventory_units_bulk(body: BulkUnitsIn, request: Request, user: dict = Depends(admin_user)) -> dict:
-    """Admin paste: one card per line (cc|exp|cvv|address|city|state|zip|country|extra).
-
-    Lines are parsed with Gemini when GEMINI_API_KEY is set (use_gemini=true), else local splitter.
-    Each valid row becomes a stock_units document and increments product available stock by 1.
-    """
-    pid = oid(body.product_id)
-    p = await db()["products"].find_one({"_id": pid, "variants.sku": body.sku})
-    if not p:
-        raise HTTPException(404, "Product / SKU not found")
-    rows = await gemini_parse_card_lines(body.raw_text) if body.use_gemini else local_parse_card_lines(body.raw_text)
-    if not rows:
-        raise HTTPException(422, "No valid card lines found")
-    inserted, skipped = 0, 0
-    errors = []
-    for i, row in enumerate(rows):
-        fp = unit_fingerprint(row["cc"], row["exp"], row["cvv"])
-        doc = {
-            "product_id": pid,
-            "sku": body.sku,
-            "status": "available",
-            "cc": row["cc"],
-            "exp": row["exp"],
-            "cvv": row["cvv"],
-            "address": row["address"],
-            "city": row["city"],
-            "state": row["state"],
-            "zip": row["zip"],
-            "country": row["country"],
-            "extra": row["extra"],
-            "fingerprint": fp,
-            "created_at": utcnow(),
-            "created_by": user["_id"],
-        }
-        try:
-            await db()["stock_units"].insert_one(doc)
-            await adjust_stock(pid, body.sku, 1, "bulk unit import", user["_id"], kind="unit_import")
-            inserted += 1
-        except DuplicateKeyError:
-            skipped += 1
-        except HTTPException as exc:
-            errors.append({"row": i + 1, "error": str(exc.detail)})
-        except Exception as exc:
-            errors.append({"row": i + 1, "error": str(exc)})
-    await audit(request, "inventory.units_bulk", user["_id"], pid, {"sku": body.sku, "inserted": inserted, "skipped": skipped}, category="inventory")
-    return {"inserted": inserted, "skipped_duplicates": skipped, "parsed": len(rows), "errors": errors[:50], "gemini": bool(settings.gemini_api_key and body.use_gemini)}
-
-
-@admin.get("/inventory/units")
-async def admin_inventory_units(product_id: str, sku: str = "DEFAULT", status: str = "available",
-                                page: int = Query(1, ge=1, le=500), user: dict = Depends(admin_user)) -> dict:
-    flt: Dict[str, Any] = {"product_id": oid(product_id), "sku": sku}
-    if status in ("available", "sold", "reserved"):
-        flt["status"] = status
-    total = await db()["stock_units"].count_documents(flt)
-    rows = []
-    async for u in db()["stock_units"].find(flt).sort("created_at", -1).skip((page - 1) * 50).limit(50):
-        rows.append({
-            "id": str(u["_id"]),
-            "cc_masked": (u.get("cc") or "")[:6] + "******",
-            "exp": u.get("exp"),
-            "country": u.get("country"),
-            "status": u.get("status"),
-            "created_at": iso(u.get("created_at")),
-        })
-    return {"total": total, "rows": rows}
 
 
 @admin.post("/inventory/import")
@@ -3577,15 +3362,8 @@ app = FastAPI(title=f"{settings.brand_name} Marketplace API", version="1.0.0", l
               docs_url=None if settings.is_production else "/docs", redoc_url=None, openapi_url=None if settings.is_production else "/openapi.json")
 app.add_middleware(sec.SecurityHeadersMiddleware)
 _cors_origins = settings.effective_origins() or ["*"]
-# Telegram WebView / web.telegram.org need loose CORS when credentials vary
-_tg_extra = ["https://web.telegram.org", "https://telegram.org"]
-for _o in _tg_extra:
-    if _o not in _cors_origins and "*" not in _cors_origins:
-        _cors_origins.append(_o)
-app.add_middleware(CORSMiddleware, allow_origins=_cors_origins if "*" not in _cors_origins else ["*"],
-                   allow_credentials=True, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-                   allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "Idempotency-Key", "X-Requested-With", "X-Telegram-Init-Data"],
-                   max_age=600)
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+                   allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "Idempotency-Key", "X-Requested-With"], max_age=600)
 
 
 @app.middleware("http")

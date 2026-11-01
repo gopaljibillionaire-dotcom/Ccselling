@@ -1,11 +1,6 @@
 <!doctype html>
 <html lang="en" data-theme="dark">
 <head>
-<meta name="referrer" content="no-referrer">
-
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>CCS shop - Premium marketplace</title>
@@ -37,8 +32,10 @@
       <button class="btn icon desktop-only" id="themeBtn" type="button" aria-label="Toggle light or dark theme"><svg class="ico-svg" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
       <button class="btn icon" id="notifBtn" type="button" aria-label="Notifications"><svg class="ico-svg" viewBox="0 0 24 24"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 0 0 4 0"/></svg><span class="badge-count hide" id="notifCount">0</span></button>
       <a class="btn icon desktop-only" href="#/cart" aria-label="Cart"><svg class="ico-svg" viewBox="0 0 24 24"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M3 4h2.5l2.2 10.5h10.6L20.5 7H6.2"/></svg><span class="badge-count hide" id="cartCount">0</span></a>
-      <button class="btn desktop-only" id="authBtn" type="button">Sign in</button>
+      <button class="btn desktop-only hide" id="authBtn" type="button">Sign in</button>
       <a class="btn primary desktop-only hide" id="acctBtn" href="#/account">Account</a>
+      <a class="btn hide" id="adminBtn" href="/admin" style="display:none">Admin</a>
+      <div class="tg-user hide" id="tgUser" aria-label="Telegram user"></div>
     </div>
   </div>
   <nav class="catnav" id="catnav" aria-label="Categories"><div class="container"><div class="row" id="catRow"></div></div></nav>
@@ -64,6 +61,7 @@
 
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 <dialog id="dlg" aria-labelledby="dlgTitle"></dialog>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="/script.js" defer></script>
 <noscript><div class="container"><p>This marketplace needs JavaScript to browse products.</p></div></noscript>
 </body>

@@ -118,24 +118,19 @@ class Settings:
     referral_reward_points: int = field(default_factory=lambda: _int("REFERRAL_REWARD_POINTS", 100))
     reconcile_interval_seconds: int = field(default_factory=lambda: _int("RECONCILE_INTERVAL_SECONDS", 60))
 
+    # --- Telegram Mini App ---------------------------------------------------
+    telegram_bot_token: str = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
+    telegram_admin_ids: List[str] = field(default_factory=lambda: _csv("TELEGRAM_ADMIN_IDS"))
+    gemini_api_key: str = field(default_factory=lambda: _env("GEMINI_API_KEY"))
+    gemini_model: str = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-2.0-flash"))
+
     # --- ImgBB ---------------------------------------------------------------
     imgbb_api_key: str = field(default_factory=lambda: _env("IMGBB_API_KEY"))
     imgbb_upload_url: str = field(default_factory=lambda: _env("IMGBB_UPLOAD_URL", "https://api.imgbb.com/1/upload"))
     image_host_allowlist: List[str] = field(
-        default_factory=lambda: _csv("IMAGE_HOST_ALLOWLIST", "i.ibb.co,ibb.co,image.ibb.co,i.ibb.co.com,b.ibb.co,thumbnails.imgbb.com,images2.imgbox.com,i.postimg.cc,postimg.cc")
+        default_factory=lambda: _csv("IMAGE_HOST_ALLOWLIST", "i.ibb.co,ibb.co,image.ibb.co,i.ibb.co.com")
     )
     max_upload_bytes: int = field(default_factory=lambda: _int("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-
-    # --- Telegram Mini App ---------------------------------------------------
-    telegram_bot_token: str = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
-    telegram_admin_ids: List[str] = field(default_factory=lambda: _csv("TELEGRAM_ADMIN_IDS"))
-    telegram_auth_max_age_seconds: int = field(default_factory=lambda: _int("TELEGRAM_AUTH_MAX_AGE_SECONDS", 86400))
-    # When true, staff role is derived from TELEGRAM_ADMIN_IDS (and DB role elevation)
-    telegram_auto_admin: bool = field(default_factory=lambda: _bool("TELEGRAM_AUTO_ADMIN", True))
-
-    # --- Gemini (line parsing for card bulk import) --------------------------
-    gemini_api_key: str = field(default_factory=lambda: _env("GEMINI_API_KEY"))
-    gemini_model: str = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-2.0-flash"))
 
     @property
     def is_production(self) -> bool:
@@ -148,14 +143,6 @@ class Settings:
     @property
     def imgbb_enabled(self) -> bool:
         return bool(self.imgbb_api_key)
-
-    @property
-    def telegram_enabled(self) -> bool:
-        return bool(self.telegram_bot_token)
-
-    @property
-    def gemini_enabled(self) -> bool:
-        return bool(self.gemini_api_key)
 
     @property
     def port(self) -> int:
@@ -191,8 +178,8 @@ class Settings:
                 problems.append("PUBLIC_APP_URL must be an https:// URL in production")
             if not self.cookie_secure:
                 problems.append("COOKIE_SECURE must be true in production")
-            if not self.admin_require_mfa:
-                problems.append("ADMIN_REQUIRE_MFA must stay enabled in production")
+            if not self.admin_require_mfa and not self.telegram_bot_token:
+                problems.append("ADMIN_REQUIRE_MFA must stay enabled in production (or set TELEGRAM_BOT_TOKEN for mini-app admins)")
             if self.plisio_enabled and self.plisio_sandbox:
                 logging.getLogger("config").warning("Plisio is in SANDBOX mode in production; no real payments will clear")
         if problems:

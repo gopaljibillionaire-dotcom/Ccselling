@@ -449,24 +449,19 @@ def verify_hmac_sha512(raw_body: bytes, header_value: Optional[str], key: str) -
 # Security headers / CSP
 # ---------------------------------------------------------------------------
 def build_csp(nonce: str) -> str:
-    """CSP tuned for Telegram Mini App embedding + ImgBB/CDN product images."""
     img_hosts = " ".join(f"https://{h}" for h in settings.image_host_allowlist)
-    # common image CDNs used by ImgBB / Telegram CDN / placeholders
-    extra_img = "https://i.ibb.co https://ibb.co https://image.ibb.co https://*.ibb.co https://api.imgbb.com https://t.me https://telegram.org https://*.telegram.org https://cdn.telegram.org https://*.telesco.pe"
     return "; ".join(
         [
             "default-src 'self'",
-            # telegram-web-app.js is loaded from telegram.org (no nonce on external tag)
-            f"script-src 'self' 'nonce-{nonce}' https://telegram.org https://*.telegram.org 'unsafe-inline'",
-            f"style-src 'self' 'nonce-{nonce}' 'unsafe-inline'",
-            "style-src-attr 'unsafe-inline'",
-            f"img-src 'self' data: blob: https: {img_hosts} {extra_img}".strip(),
-            "font-src 'self' data:",
-            "connect-src 'self' https://api.telegram.org https://telegram.org https://*.telegram.org https://api.imgbb.com",
+            f"script-src 'self' 'nonce-{nonce}'",
+            f"style-src 'self' 'nonce-{nonce}'",
+            "style-src-attr 'unsafe-inline'",  # DOM-built inline style attributes only; scripts stay nonce-locked
+            f"img-src 'self' data: blob: {img_hosts}".strip(),
+            "font-src 'self'",
+            "connect-src 'self'",
             "object-src 'none'",
-            "base-uri 'self'",
-            # CRITICAL: allow Telegram to embed the Mini App
-            "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org https://telegram.org",
+            "base-uri 'none'",
+            "frame-ancestors 'none'",
             "form-action 'self'",
         ]
     )
@@ -488,12 +483,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if not request.url.path.startswith(self.DOC_PATHS):
             h.setdefault("Content-Security-Policy", build_csp(request.state.csp_nonce))
         h.setdefault("X-Content-Type-Options", "nosniff")
-        # DENY blocks Telegram WebView embedding; use CSP frame-ancestors instead
-        path = request.url.path or ""
-        if path.startswith("/api/"):
-            h.setdefault("X-Frame-Options", "DENY")
-        else:
-            h.setdefault("X-Frame-Options", "SAMEORIGIN")
+        h.setdefault("X-Frame-Options", "DENY")
         h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
         h.setdefault("Cross-Origin-Opener-Policy", "same-origin")
