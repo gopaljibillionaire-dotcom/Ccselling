@@ -2,7 +2,7 @@
 "use strict";
 (() => {
 const $ = (s, r = document) => r.querySelector(s);
-const state = { user: null, csrf: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0 };
+const state = { user: null, csrf: null, token: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0, tg: null };
 const _homeCache = { at: 0, key: "", data: null };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -35,6 +35,7 @@ class ApiError extends Error { constructor(msg, status) { super(msg); this.statu
 async function api(path, { method = "GET", body, headers = {} } = {}) {
   const opts = { method, credentials: "same-origin", headers: { Accept: "application/json", ...headers } };
   if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
+  if (state.token) opts.headers["Authorization"] = "Bearer " + state.token;
   if (method !== "GET" && state.csrf) opts.headers["X-CSRF-Token"] = state.csrf;
   let res;
   try { res = await fetch("/api" + path, opts); } catch { throw new ApiError("Network problem - check your connection and retry.", 0); }
@@ -162,14 +163,57 @@ function renderAuthState() {
   $("#authBtn").classList.toggle("hide", li); $("#acctBtn").classList.toggle("hide", !li);
   $("#notifBtn").classList.toggle("hide", !li);
   $("#cartCount").classList.toggle("hide", true);
+  const adminBtn = $("#adminBtn");
+  if (adminBtn) {
+    const isStaff = state.user && ["support", "admin", "superadmin"].includes(state.user.role);
+    adminBtn.classList.toggle("hide", !isStaff);
+  }
+  // show telegram avatar/name when present
+  const tgBadge = $("#tgUserBadge");
+  if (tgBadge) {
+    if (state.user && (state.user.photo_url || state.user.name)) {
+      tgBadge.classList.remove("hide");
+      const img = tgBadge.querySelector("img");
+      const nm = tgBadge.querySelector("span");
+      if (img) { img.src = state.user.photo_url || ""; img.classList.toggle("hide", !state.user.photo_url); }
+      if (nm) nm.textContent = state.user.name || "";
+    } else {
+      tgBadge.classList.add("hide");
+    }
+  }
   updateCartBadge();
 }
 async function loadSession() {
+  // restore bearer token from prior telegram auth (sessionStorage)
+  try {
+    const t = sessionStorage.getItem("tg_token");
+    if (t) state.token = t;
+  } catch { /* ignore */ }
+
+  // Telegram Mini App auto-login when opened inside Telegram
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg && tg.initData) {
+    state.tg = tg;
+    try { tg.ready(); tg.expand(); } catch { /* older clients */ }
+    try {
+      const r = await api("/auth/telegram", { method: "POST", body: { init_data: tg.initData } });
+      state.token = r.token; state.csrf = r.csrf; state.user = r.user;
+      state.wishlist = new Set((r.user && r.user.wishlist) || []);
+      try { sessionStorage.setItem("tg_token", r.token); } catch { /* ignore */ }
+      if (r.user && r.user.theme) setTheme(r.user.theme, false);
+      renderAuthState();
+      return;
+    } catch (e) {
+      console.warn("telegram auth failed", e);
+      // fall through to cookie session
+    }
+  }
+
   try {
     const r = await api("/auth/me");
     state.user = r.user; state.csrf = r.csrf; state.wishlist = new Set(r.user.wishlist || []);
     if (r.user.theme) setTheme(r.user.theme, false);
-  } catch { state.user = null; state.csrf = null; }
+  } catch { state.user = null; state.csrf = null; state.token = null; }
   renderAuthState();
 }
 function requireLogin(msg = "Please sign in to continue.") { if (state.user) return true; toast(msg); authDialog("login"); return false; }
@@ -261,7 +305,7 @@ function authDialog(mode = "login") {
   openDialog(mode === "login" ? "Sign in" : "Create account", form);
   loadCap(); setTimeout(() => email.focus(), 30);
 }
-const logout = guard(async () => { await api("/auth/logout", { method: "POST" }); state.user = null; state.csrf = null; state.cart = null; state.wishlist = new Set(); renderAuthState(); toast("Signed out.", "ok"); location.hash = "#/"; });
+const logout = guard(async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} state.user = null; state.csrf = null; state.token = null; state.cart = null; state.wishlist = new Set(); try { sessionStorage.removeItem("tg_token"); } catch {} renderAuthState(); toast("Signed out.", "ok"); location.hash = "#/"; });
 
 /* ---------- Cart ---------- */
 const guestCart = () => store.get("guestCart", []);
