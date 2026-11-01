@@ -542,7 +542,7 @@ async def get_session(request: Request) -> Optional[dict]:
     return sess
 
 
-EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook"}
+EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook", "/api/telegram/webhook", "/api/telegram/setup"}
 
 
 async def api_rate_limit(request: Request) -> None:
@@ -1771,6 +1771,140 @@ class BulkUnitsIn(BaseModel):
     use_gemini: bool = True
 
 
+
+async def telegram_bot_api(method: str, payload: Optional[dict] = None) -> dict:
+    if not settings.telegram_bot_token:
+        raise HTTPException(503, "TELEGRAM_BOT_TOKEN not configured")
+    assert S.http is not None
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/{method}"
+    r = await S.http.post(url, json=payload or {})
+    data = r.json()
+    if not data.get("ok"):
+        log.error("telegram API %s failed: %s", method, data)
+        raise HTTPException(502, f"Telegram API error: {data.get('description', 'unknown')}")
+    return data.get("result") or {}
+
+
+async def tg_send_message(chat_id: int | str, text: str, reply_markup: Optional[dict] = None) -> None:
+    body: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        body["reply_markup"] = reply_markup
+    try:
+        await telegram_bot_api("sendMessage", body)
+    except Exception as exc:
+        log.error("tg_send_message failed: %s", exc)
+
+
+def miniapp_keyboard() -> dict:
+    """Reply keyboard / inline button that opens the Mini App."""
+    url = settings.public_app_url
+    return {
+        "inline_keyboard": [[
+            {"text": "🛒 Open Shop", "web_app": {"url": url}},
+        ], [
+            {"text": "🛠 Admin Panel", "web_app": {"url": url.rstrip("/") + "/admin"}},
+        ]]
+    }
+
+
+@api.post("/telegram/webhook")
+async def telegram_webhook(request: Request) -> dict:
+    """Receive Bot API updates. Always return 200 so Telegram does not retry forever."""
+    try:
+        update = await request.json()
+    except Exception:
+        return {"ok": True}
+    try:
+        msg = update.get("message") or update.get("edited_message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        text = (msg.get("text") or "").strip()
+        from_user = msg.get("from") or {}
+        if not chat_id:
+            # callback_query etc.
+            cq = update.get("callback_query") or {}
+            if cq:
+                chat_id = (cq.get("message") or {}).get("chat", {}).get("id")
+                text = cq.get("data") or ""
+            if not chat_id:
+                return {"ok": True}
+        low = text.lower()
+        if low.startswith("/start") or low in ("start", "menu", "shop", "/shop"):
+            name = (from_user.get("first_name") or "there").replace("<", "")
+            is_admin = str(from_user.get("id")) in {x.strip() for x in settings.telegram_admin_ids if x.strip()}
+            body = (
+                f"Hey {name} 👋\n\n"
+                f"<b>{settings.brand_name}</b> is ready.\n"
+                "Tap the button below to open the shop."
+            )
+            if is_admin:
+                body += "\n\nYou have <b>admin</b> access."
+            await tg_send_message(chat_id, body, miniapp_keyboard())
+        elif low.startswith("/admin"):
+            if str(from_user.get("id")) in {x.strip() for x in settings.telegram_admin_ids if x.strip()}:
+                await tg_send_message(chat_id, "Open the admin panel:", {
+                    "inline_keyboard": [[{"text": "🛠 Admin Panel", "web_app": {"url": settings.public_app_url.rstrip('/') + '/admin'}}]]
+                })
+            else:
+                await tg_send_message(chat_id, "You are not on the admin list.")
+        elif low.startswith("/help"):
+            await tg_send_message(chat_id, "Commands:\n/start – open shop\n/admin – admin panel (staff only)\n/help – this message", miniapp_keyboard())
+        else:
+            # any other message → nudge to mini app
+            await tg_send_message(chat_id, "Open the shop from the button below.", miniapp_keyboard())
+    except Exception as exc:
+        log.exception("telegram webhook handler error: %s", exc)
+    return {"ok": True}
+
+
+@api.post("/telegram/setup")
+async def telegram_setup(request: Request, user: dict = Depends(admin_user)) -> dict:
+    """Set webhook + bot commands. Call once after deploy (admin session required)."""
+    if not settings.telegram_bot_token:
+        raise HTTPException(503, "TELEGRAM_BOT_TOKEN missing")
+    webhook_url = settings.public_app_url.rstrip("/") + "/api/telegram/webhook"
+    result = await telegram_bot_api("setWebhook", {
+        "url": webhook_url,
+        "allowed_updates": ["message", "callback_query"],
+        "drop_pending_updates": True,
+    })
+    await telegram_bot_api("setMyCommands", {
+        "commands": [
+            {"command": "start", "description": "Open the shop"},
+            {"command": "admin", "description": "Admin panel"},
+            {"command": "help", "description": "Help"},
+        ]
+    })
+    # Menu button → Mini App
+    try:
+        await telegram_bot_api("setChatMenuButton", {
+            "menu_button": {
+                "type": "web_app",
+                "text": "Shop",
+                "web_app": {"url": settings.public_app_url},
+            }
+        })
+    except Exception as exc:
+        log.warning("setChatMenuButton failed: %s", exc)
+    await audit(request, "telegram.setup", user["_id"], meta={"webhook": webhook_url})
+    return {"ok": True, "webhook_url": webhook_url, "setWebhook": result}
+
+
+@api.get("/telegram/status")
+async def telegram_status(user: dict = Depends(admin_user)) -> dict:
+    if not settings.telegram_bot_token:
+        return {"configured": False}
+    info = await telegram_bot_api("getWebhookInfo")
+    me = await telegram_bot_api("getMe")
+    return {"configured": True, "bot": me, "webhook": info}
+
+
+
 @api.post("/auth/register", status_code=201)
 async def register(body: RegisterIn, request: Request, response: Response) -> dict:
     await sensitive(request, "register")
@@ -2112,8 +2246,13 @@ async def home(country: str = "") -> dict:
             {"$match": {"status": "published", "rating_count": {"$gt": 0}}},
             {"$group": {"_id": None, "sum": {"$sum": "$rating_sum"}, "cnt": {"$sum": "$rating_count"}}},
         ]
-        agg = await db()["products"].aggregate(pipe).to_list(1)
         avg_review = None
+        try:
+            cursor = await db()["products"].aggregate(pipe)
+            agg = await cursor.to_list(1)
+        except TypeError:
+            # driver already returned a cursor (not a coroutine)
+            agg = await db()["products"].aggregate(pipe).to_list(1)
         if agg and agg[0].get("cnt"):
             avg_review = round(float(agg[0]["sum"]) / float(agg[0]["cnt"]), 2)
         # Match admin overview: total customers + completed orders (attractive social proof)
@@ -2484,7 +2623,13 @@ async def admin_stats(user: dict = Depends(staff)) -> dict:
     c = lambda col, q: db()[col].count_documents(q)  # noqa: E731
     low_q = {"status": "published", "$expr": {"$anyElementTrue": {"$map": {"input": "$variants", "as": "v", "in": {"$and": [{"$gt": ["$$v.available", 0]}, {"$lte": ["$$v.available", "$low_stock_threshold"]}]}}}}}
     out_q = {"status": "published", "$expr": {"$lte": [{"$sum": "$variants.available"}, 0]}}
-    rev = await (await db()["orders"].aggregate([{"$match": {"status": {"$in": ["paid", "refunded"]}}}, {"$group": {"_id": None, "rev": {"$sum": "$total_minor"}, "ref": {"$sum": "$refund_total_minor"}}}])).to_list(1)
+    rev_cur = await db()["orders"].aggregate([{"$match": {"status": {"$in": ["paid", "refunded"]}}}, {"$group": {"_id": None, "rev": {"$sum": "$total_minor"}, "ref": {"$sum": "$refund_total_minor"}}}])
+    try:
+        rev = await rev_cur.to_list(1)
+    except TypeError:
+        rev = await rev_cur  # already list-like
+        if not isinstance(rev, list):
+            rev = await rev.to_list(1)
     since = utcnow() - timedelta(days=30)
     return {"currency": settings.default_currency, "customers_total": await c("users", {"role": "customer"}),
             "customers_active": await c("sessions", {"kind": "full", "last_seen": {"$gt": since}}), "products_published": await c("products", {"status": "published"}),
@@ -3376,8 +3521,15 @@ app = FastAPI(title=f"{settings.brand_name} Marketplace API", version="1.0.0", l
               docs_url=None if settings.is_production else "/docs", redoc_url=None, openapi_url=None if settings.is_production else "/openapi.json")
 app.add_middleware(sec.SecurityHeadersMiddleware)
 _cors_origins = settings.effective_origins() or ["*"]
-app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-                   allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "Idempotency-Key", "X-Requested-With"], max_age=600)
+# Telegram WebView / web.telegram.org need loose CORS when credentials vary
+_tg_extra = ["https://web.telegram.org", "https://telegram.org"]
+for _o in _tg_extra:
+    if _o not in _cors_origins and "*" not in _cors_origins:
+        _cors_origins.append(_o)
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins if "*" not in _cors_origins else ["*"],
+                   allow_credentials=True, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                   allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "Idempotency-Key", "X-Requested-With", "X-Telegram-Init-Data"],
+                   max_age=600)
 
 
 @app.middleware("http")

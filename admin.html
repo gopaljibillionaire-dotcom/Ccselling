@@ -986,7 +986,7 @@ if (document.readyState === "loading") {
         window.state.token = data.token;
       }
       // expose for existing admin api wrappers if they read cookies only
-      window.__tgToken = data.token;
+      window.__tgToken = data.token; try { sessionStorage.setItem("tg_token", data.token); } catch (e) {}
       window.__tgCsrf = data.csrf;
       if (!(data.user && ["admin", "superadmin", "support"].includes(data.user.role))) {
         document.body.insertAdjacentHTML("afterbegin", '<div style="padding:12px;background:#3b0;color:#fff">Signed in via Telegram, but this account is not staff. Add your Telegram ID to TELEGRAM_ADMIN_IDS.</div>');

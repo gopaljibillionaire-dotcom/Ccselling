@@ -2,7 +2,7 @@
 "use strict";
 (() => {
 const $ = (s, r = document) => r.querySelector(s);
-const state = { user: null, csrf: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0, tg: null, isTelegram: false, token: null };
+const state = { user: null, csrf: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0, tg: null, isTelegram: false, token: (function(){ try { return sessionStorage.getItem("tg_token"); } catch(e){ return null; } })() };
 const _homeCache = { at: 0, key: "", data: null };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -682,15 +682,28 @@ function renderCountrySelect() {
 
 async function telegramLogin() {
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (!tg || !tg.initData) return false;
+  if (!tg) return false;
+  // wait briefly for initData (some clients inject late)
+  let tries = 0;
+  while (!tg.initData && tries < 20) {
+    await new Promise((r) => setTimeout(r, 50));
+    tries++;
+  }
+  if (!tg.initData) return false;
   state.isTelegram = true;
   state.tg = tg;
-  try { tg.ready(); tg.expand(); } catch (e) { /* ignore */ }
+  try {
+    tg.ready();
+    tg.expand();
+    if (tg.setHeaderColor) try { tg.setHeaderColor("secondary_bg_color"); } catch (e) {}
+    if (tg.setBackgroundColor) try { tg.setBackgroundColor("bg_color"); } catch (e) {}
+  } catch (e) { /* ignore */ }
   try {
     const r = await api("/auth/telegram", { method: "POST", body: { init_data: tg.initData } });
     state.user = r.user;
     state.csrf = r.csrf;
     state.token = r.token || null;
+    try { if (state.token) sessionStorage.setItem("tg_token", state.token); } catch (e) {}
     state.wishlist = new Set((r.user && r.user.wishlist) || []);
     if (r.user && r.user.theme) setTheme(r.user.theme, false);
     renderAuthState();
