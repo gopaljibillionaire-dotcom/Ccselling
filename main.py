@@ -2506,7 +2506,66 @@ async def admin_bulk_cards(body: BulkCardsIn, request: Request, user: dict = Dep
             DeliveryIn(label="Country", value=code, kind="text"),
             DeliveryIn(label="Extra info", value=row.get("extra") or "—", kind="text"),
         ]
-        # drop empty placeholders that are just em-dash if all blank — keep structure stable
+        # Auto-fill required dynamic schema fields (e.g. card type CC/DC/MC)
+        sf = await schema_fields_for(cat_id)
+        auto_fields: dict = {}
+        # map network brand → common type codes used in schemas
+        brand_type = {
+            "Visa": "CC",
+            "Mastercard": "MC",
+            "Amex": "CC",
+            "Discover": "CC",
+            "JCB": "CC",
+            "Card": "CC",
+        }.get(brand, "CC")
+        for key, fd in sf.items():
+            label = (fd.get("label") or key or "").lower()
+            ftype = fd.get("type")
+            opts = list(fd.get("options") or [])
+            default = fd.get("default")
+            val = None
+            # card type / network dropdowns
+            if ftype in ("dropdown", "text", "variant") and (
+                any(x in label for x in ("type", "card type", "cc type", "network", "brand", "scheme"))
+                or ("cc" in label and "dc" in label)
+                or label.replace(" ", "") in ("cc,dc,mc", "cc/dc/mc", "cc|dc|mc")
+                or set(str(o).upper() for o in opts) >= {"CC", "DC", "MC"}
+            ):
+                # prefer exact option match
+                for candidate in (brand_type, brand, "CC", "MC", "DC", "Visa", "Mastercard"):
+                    if opts and candidate in opts:
+                        val = candidate
+                        break
+                    if not opts:
+                        val = brand_type
+                        break
+                if val is None and opts:
+                    # last resort: first option that looks like a card type
+                    for o in opts:
+                        if str(o).upper() in ("CC", "DC", "MC", "VISA", "MASTERCARD", "AMEX"):
+                            val = o
+                            break
+                    if val is None:
+                        val = opts[0]
+            elif ftype == "country" and fd.get("required"):
+                val = code
+            elif default not in (None, ""):
+                val = default
+            elif fd.get("required"):
+                if ftype == "dropdown" and opts:
+                    # pick CC if present else first
+                    val = next((o for o in opts if str(o).upper() in ("CC", "MC", "DC")), opts[0])
+                elif ftype in ("text", "variant", "region"):
+                    val = brand_type if any(x in label for x in ("type", "cc", "card")) else brand
+                elif ftype == "boolean":
+                    val = False
+                elif ftype in ("number", "stock"):
+                    val = 0
+                elif ftype == "decimal":
+                    val = "0.00"
+            if val is not None:
+                auto_fields[key] = val
+
         pin = ProductIn(
             name=title,
             short_description=short,
@@ -2519,7 +2578,7 @@ async def admin_bulk_cards(body: BulkCardsIn, request: Request, user: dict = Dep
             images=body.images,
             variants=[VariantIn(sku="DEFAULT", label="Standard", stock=1)],
             stock=1,
-            fields={},
+            fields=auto_fields,
             tags=list(body.tags) + [brand.lower(), code.lower()],
             featured=body.featured,
             status=body.status,
