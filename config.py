@@ -70,8 +70,17 @@ class Settings:
     trust_proxy_hops: int = field(default_factory=lambda: _int("TRUST_PROXY_HOPS", 1))
 
     # --- Admin policy --------------------------------------------------------
-    admin_require_mfa: bool = field(default_factory=lambda: _bool("ADMIN_REQUIRE_MFA", True))
+    admin_require_mfa: bool = field(default_factory=lambda: _bool("ADMIN_REQUIRE_MFA", False))
     invite_only: bool = field(default_factory=lambda: _bool("INVITE_ONLY", False))
+
+    # --- Telegram Mini App ---------------------------------------------------
+    telegram_bot_token: str = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
+    telegram_bot_username: str = field(default_factory=lambda: _env("TELEGRAM_BOT_USERNAME"))
+    # Comma-separated Telegram user IDs that receive admin (superadmin) privileges.
+    telegram_admin_ids: List[str] = field(default_factory=lambda: _csv("TELEGRAM_ADMIN_IDS"))
+    telegram_init_data_max_age: int = field(default_factory=lambda: _int("TELEGRAM_INIT_DATA_MAX_AGE", 86400))
+    # When true, storefront auto-authenticates via Telegram WebApp initData.
+    telegram_miniapp_mode: bool = field(default_factory=lambda: _bool("TELEGRAM_MINIAPP_MODE", True))
 
     # --- Rate limiting -------------------------------------------------------
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL"))
@@ -118,12 +127,6 @@ class Settings:
     referral_reward_points: int = field(default_factory=lambda: _int("REFERRAL_REWARD_POINTS", 100))
     reconcile_interval_seconds: int = field(default_factory=lambda: _int("RECONCILE_INTERVAL_SECONDS", 60))
 
-    # --- Telegram Mini App ---------------------------------------------------
-    telegram_bot_token: str = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
-    telegram_admin_ids: List[str] = field(default_factory=lambda: _csv("TELEGRAM_ADMIN_IDS"))
-    gemini_api_key: str = field(default_factory=lambda: _env("GEMINI_API_KEY"))
-    gemini_model: str = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-2.0-flash"))
-
     # --- ImgBB ---------------------------------------------------------------
     imgbb_api_key: str = field(default_factory=lambda: _env("IMGBB_API_KEY"))
     imgbb_upload_url: str = field(default_factory=lambda: _env("IMGBB_UPLOAD_URL", "https://api.imgbb.com/1/upload"))
@@ -143,6 +146,19 @@ class Settings:
     @property
     def imgbb_enabled(self) -> bool:
         return bool(self.imgbb_api_key)
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return bool(self.telegram_bot_token)
+
+    @property
+    def telegram_admin_id_set(self) -> set:
+        out = set()
+        for x in self.telegram_admin_ids:
+            s = str(x).strip()
+            if s.isdigit():
+                out.add(s)
+        return out
 
     @property
     def port(self) -> int:
@@ -178,8 +194,10 @@ class Settings:
                 problems.append("PUBLIC_APP_URL must be an https:// URL in production")
             if not self.cookie_secure:
                 problems.append("COOKIE_SECURE must be true in production")
-            if not self.admin_require_mfa and not self.telegram_bot_token:
-                problems.append("ADMIN_REQUIRE_MFA must stay enabled in production (or set TELEGRAM_BOT_TOKEN for mini-app admins)")
+            if self.telegram_miniapp_mode and not self.telegram_bot_token:
+                problems.append("TELEGRAM_BOT_TOKEN is required when TELEGRAM_MINIAPP_MODE is enabled")
+            # MFA is optional when admins are identified by TELEGRAM_ADMIN_IDS allowlist.
+            # Keep ADMIN_REQUIRE_MFA=true only if you still use password+TOTP for staff outside Mini App.
             if self.plisio_enabled and self.plisio_sandbox:
                 logging.getLogger("config").warning("Plisio is in SANDBOX mode in production; no real payments will clear")
         if problems:

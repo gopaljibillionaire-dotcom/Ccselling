@@ -2,48 +2,7 @@
 "use strict";
 (() => {
 const $ = (s, r = document) => r.querySelector(s);
-
-/* ---------- Telegram Mini App auth ---------- */
-async function telegramAuth() {
-  const tg = window.Telegram && window.Telegram.WebApp;
-  if (!tg) return false;
-  try { tg.ready(); tg.expand(); } catch {}
-  const initData = tg.initData || "";
-  if (!initData) return false;
-  try {
-    const r = await api("/auth/telegram", { method: "POST", body: { init_data: initData } });
-    state.user = r.user;
-    state.csrf = r.csrf;
-    if (r.token) state.token = r.token;
-    state.wishlist = new Set((r.user && r.user.wishlist) || []);
-    if (r.user && r.user.theme) setTheme(r.user.theme, false);
-    renderAuthState();
-    return true;
-  } catch (e) {
-    console.warn("telegram auth failed", e);
-    return false;
-  }
-}
-
-function renderTgUser() {
-  const el = $("#tgUser");
-  if (!el) return;
-  if (!state.user) { el.classList.add("hide"); el.innerHTML = ""; return; }
-  el.classList.remove("hide");
-  const photo = state.user.photo_url
-    ? `<img src="${state.user.photo_url}" alt="" class="tg-avatar">`
-    : `<span class="tg-avatar fallback">${(state.user.name || "?").slice(0,1)}</span>`;
-  const uname = state.user.username ? "@" + state.user.username : (state.user.name || "User");
-  el.innerHTML = `${photo}<span class="tg-name">${uname}</span>`;
-  const ab = $("#adminBtn");
-  if (ab) {
-    const show = !!(state.user.is_admin || (state.user.role && ["admin","superadmin","support"].includes(state.user.role)));
-    ab.style.display = show ? "" : "none";
-    ab.classList.toggle("hide", !show);
-  }
-}
-
-const state = { user: null, csrf: null, token: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0 };
+const state = { user: null, csrf: null, cfg: { currency: "USD", tiers: [] }, countries: [], categories: [], country: "", cart: null, wishlist: new Set(), loadId: 0 };
 const _homeCache = { at: 0, key: "", data: null };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -76,8 +35,8 @@ class ApiError extends Error { constructor(msg, status) { super(msg); this.statu
 async function api(path, { method = "GET", body, headers = {} } = {}) {
   const opts = { method, credentials: "same-origin", headers: { Accept: "application/json", ...headers } };
   if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
-  if (state.token) opts.headers["Authorization"] = "Bearer " + state.token;
   if (method !== "GET" && state.csrf) opts.headers["X-CSRF-Token"] = state.csrf;
+  if (state.sessionToken) opts.headers["Authorization"] = "Bearer " + state.sessionToken;
   let res;
   try { res = await fetch("/api" + path, opts); } catch { throw new ApiError("Network problem - check your connection and retry.", 0); }
   let data = null;
@@ -198,28 +157,144 @@ const skeletons = (n = 8) => h("div", { class: "grid products tableish" }, Array
 const empty = (msg, cta) => h("div", { class: "empty" }, h("p", null, msg), cta || null);
 const errorBox = (e, retry) => h("div", { class: "empty", role: "alert" }, h("p", null, e.message || "Could not load this section."), retry ? h("button", { class: "btn", type: "button", onclick: retry }, "Retry") : null);
 
+/* ---------- Telegram Mini App ---------- */
+function tgReady() {
+  try {
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (!tg) return null;
+    tg.ready();
+    try { tg.expand(); } catch (e) { /* older clients */ }
+    // Theme bridge: prefer Telegram theme if available
+    try {
+      const tp = tg.themeParams || {};
+      if (tp.bg_color) document.documentElement.style.setProperty("--tg-bg", tp.bg_color);
+      if (tp.text_color) document.documentElement.style.setProperty("--tg-text", tp.text_color);
+      if (tp.button_color) document.documentElement.style.setProperty("--tg-button", tp.button_color);
+      if (tg.colorScheme === "dark" || tg.colorScheme === "light") {
+        // do not force; keep user preference unless unset
+      }
+    } catch (e) { /* ignore */ }
+    // Safe area / viewport
+    try {
+      const root = document.documentElement;
+      if (typeof tg.viewportStableHeight === "number") {
+        root.style.setProperty("--tg-viewport-stable", tg.viewportStableHeight + "px");
+      }
+      tg.onEvent && tg.onEvent("viewportChanged", () => {
+        if (typeof tg.viewportStableHeight === "number") {
+          root.style.setProperty("--tg-viewport-stable", tg.viewportStableHeight + "px");
+        }
+      });
+    } catch (e) { /* ignore */ }
+    // BackButton -> hash history
+    try {
+      if (tg.BackButton) {
+        tg.BackButton.onClick(() => {
+          if (location.hash && location.hash !== "#/" && location.hash !== "#") {
+            history.back();
+          } else {
+            try { tg.close(); } catch (e2) { /* ignore */ }
+          }
+        });
+        const syncBack = () => {
+          const h = location.hash || "#/";
+          if (h === "#/" || h === "#" || h === "") tg.BackButton.hide();
+          else tg.BackButton.show();
+        };
+        window.addEventListener("hashchange", syncBack);
+        syncBack();
+      }
+    } catch (e) { /* ignore */ }
+    state.tg = tg;
+    return tg;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function authenticateWithTelegram() {
+  const tg = state.tg || tgReady();
+  if (!tg || !tg.initData) return false;
+  try {
+    const r = await api("/auth/telegram", { method: "POST", body: { init_data: tg.initData } });
+    state.user = r.user;
+    state.csrf = r.csrf;
+    if (r.token) state.sessionToken = r.token;
+    state.wishlist = new Set((r.user && r.user.wishlist) || []);
+    if (r.user && r.user.theme) setTheme(r.user.theme, false);
+    renderAuthState();
+    return true;
+  } catch (e) {
+    console.warn("Telegram auth failed", e);
+    return false;
+  }
+}
+
+
 /* ---------- Auth state ---------- */
 function renderAuthState() {
   const li = !!state.user;
-  const inTg = !!(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData);
-  $("#authBtn").classList.toggle("hide", li || inTg);
-  $("#acctBtn").classList.toggle("hide", !li);
+  const authBtn = $("#authBtn");
+  const acctBtn = $("#acctBtn");
+  authBtn.classList.toggle("hide", li);
+  acctBtn.classList.toggle("hide", !li);
   $("#notifBtn").classList.toggle("hide", !li);
   $("#cartCount").classList.toggle("hide", true);
+  if (!li && state.cfg && state.cfg.telegram_enabled) {
+    authBtn.textContent = "Continue with Telegram";
+  } else if (!li) {
+    authBtn.textContent = "Sign in";
+  }
+  if (li && acctBtn) {
+    const label = (state.user.name || state.user.telegram_username || "Account");
+    acctBtn.textContent = label.length > 18 ? label.slice(0, 16) + "…" : label;
+  }
+  // Admin deep-link affordance: only show if backend marks is_admin
+  let adminLink = document.getElementById("adminEntry");
+  if (li && state.user && state.user.is_admin) {
+    if (!adminLink) {
+      adminLink = document.createElement("a");
+      adminLink.id = "adminEntry";
+      adminLink.className = "btn desktop-only";
+      adminLink.href = "/admin";
+      adminLink.textContent = "Admin";
+      authBtn.parentNode && authBtn.parentNode.insertBefore(adminLink, authBtn.nextSibling);
+    }
+    adminLink.classList.remove("hide");
+  } else if (adminLink) {
+    adminLink.classList.add("hide");
+  }
   updateCartBadge();
-  renderTgUser();
 }
 async function loadSession() {
-  const ok = await telegramAuth();
-  if (ok) return;
+  tgReady();
+  // Prefer existing cookie/Bearer session
   try {
     const r = await api("/auth/me");
     state.user = r.user; state.csrf = r.csrf; state.wishlist = new Set(r.user.wishlist || []);
     if (r.user.theme) setTheme(r.user.theme, false);
-  } catch { state.user = null; state.csrf = null; }
+    renderAuthState();
+    return;
+  } catch { /* not signed in yet */ }
+  // Auto-auth via Telegram WebApp initData
+  if (state.cfg && state.cfg.telegram_miniapp_mode !== false) {
+    const ok = await authenticateWithTelegram();
+    if (ok) return;
+  }
+  state.user = null; state.csrf = null;
   renderAuthState();
 }
-function requireLogin(msg = "Please sign in to continue.") { if (state.user) return true; toast(msg); authDialog("login"); return false; }
+function requireLogin(msg = "Please sign in to continue.") {
+  if (state.user) return true;
+  if (state.tg && state.tg.initData) {
+    // fire-and-forget re-auth then toast
+    authenticateWithTelegram().then((ok) => { if (!ok) toast(msg || "Telegram sign-in failed. Open this Mini App from the bot."); else route(); });
+    return false;
+  }
+  toast(msg);
+  authDialog("login");
+  return false;
+}
 
 function authDialog(mode = "login") {
   const err = h("div", { class: "error-text", role: "alert" });
@@ -308,7 +383,7 @@ function authDialog(mode = "login") {
   openDialog(mode === "login" ? "Sign in" : "Create account", form);
   loadCap(); setTimeout(() => email.focus(), 30);
 }
-const logout = guard(async () => { await api("/auth/logout", { method: "POST" }); state.user = null; state.csrf = null; state.cart = null; state.wishlist = new Set(); renderAuthState(); toast("Signed out.", "ok"); location.hash = "#/"; });
+const logout = guard(async () => { try { await api("/auth/logout", { method: "POST" }); } catch (e) { /* ignore */ } state.user = null; state.csrf = null; state.sessionToken = null; state.cart = null; state.wishlist = new Set(); renderAuthState(); toast("Signed out.", "ok"); location.hash = "#/"; });
 
 /* ---------- Cart ---------- */
 const guestCart = () => store.get("guestCart", []);
@@ -643,12 +718,29 @@ async function accSettings() {
   const name = h("input", { id: "st_name", value: state.user.name || "", maxlength: 80 }); const orders = h("input", { type: "checkbox", id: "st_o", checked: nt.orders !== false }); const promo = h("input", { type: "checkbox", id: "st_p", checked: !!nt.promotions });
   const profile = h("form", { class: "panel stack" }, h("h2", null, "Profile & notifications"), h("div", { class: "field" }, h("label", { for: "st_name" }, "Name"), name), h("label", { class: "check" }, orders, "Order & payment updates"), h("label", { class: "check" }, promo, "Promotions"), h("button", { class: "btn primary", type: "submit" }, "Save"));
   profile.addEventListener("submit", guard(async (e) => { e.preventDefault(); const u = await api("/account/profile", { method: "PATCH", body: { name: name.value, notifications: { orders: orders.checked, promotions: promo.checked } } }); state.user = { ...state.user, ...u }; toast("Saved.", "ok"); }));
-  const cur = h("input", { type: "password", id: "pw_c", autocomplete: "current-password" }); const nw = h("input", { type: "password", id: "pw_n", autocomplete: "new-password" });
-  const pwf = h("form", { class: "panel stack" }, h("h2", null, "Change password"), h("div", { class: "field" }, h("label", { for: "pw_c" }, "Current password"), cur), h("div", { class: "field" }, h("label", { for: "pw_n" }, "New password"), nw), h("button", { class: "btn", type: "submit" }, "Update password"));
-  pwf.addEventListener("submit", guard(async (e) => { e.preventDefault(); await api("/account/password", { method: "POST", body: { current_password: cur.value, new_password: nw.value } }); pwf.reset(); toast("Password updated. Other sessions were signed out.", "ok"); }));
+  const isTg = state.user && (state.user.auth_provider === "telegram" || state.user.telegram_id);
+  const tgPanel = isTg ? h("div", { class: "panel stack" },
+    h("h2", null, "Telegram account"),
+    h("div", { class: "row", style: "gap:12px;align-items:center" },
+      state.user.telegram_photo_url ? h("img", { src: state.user.telegram_photo_url, alt: "", width: "48", height: "48", style: "border-radius:50%;object-fit:cover" }) : null,
+      h("div", null,
+        h("div", null, state.user.name || "Telegram user"),
+        state.user.telegram_username ? h("div", { class: "small muted" }, "@" + state.user.telegram_username) : null,
+        h("div", { class: "small muted" }, "ID " + (state.user.telegram_id || "")),
+        state.user.is_admin ? h("span", { class: "chip ok" }, "Administrator") : null
+      )
+    ),
+    h("p", { class: "small muted" }, "You are signed in with Telegram. No website password is required.")
+  ) : null;
+  let pwf = null;
+  if (!isTg) {
+    const cur = h("input", { type: "password", id: "pw_c", autocomplete: "current-password" }); const nw = h("input", { type: "password", id: "pw_n", autocomplete: "new-password" });
+    pwf = h("form", { class: "panel stack" }, h("h2", null, "Change password"), h("div", { class: "field" }, h("label", { for: "pw_c" }, "Current password"), cur), h("div", { class: "field" }, h("label", { for: "pw_n" }, "New password"), nw), h("button", { class: "btn", type: "submit" }, "Update password"));
+    pwf.addEventListener("submit", guard(async (e) => { e.preventDefault(); await api("/account/password", { method: "POST", body: { current_password: cur.value, new_password: nw.value } }); pwf.reset(); toast("Password updated. Other sessions were signed out.", "ok"); }));
+  }
   const sess = h("div", { class: "panel stack" }, h("div", { class: "row between" }, h("h2", null, "Active sessions"), h("button", { class: "btn sm", type: "button", onclick: guard(async () => { const r = await api("/account/sessions/revoke-others", { method: "POST" }); toast(`Signed out ${r.revoked} other session(s).`, "ok"); route(); }) }, "Sign out others")),
     s.sessions.map((x) => h("div", { class: "row between small" }, h("div", null, h("div", null, (x.ua || "Unknown device").slice(0, 60), x.current ? h("span", { class: "chip ok" }, "this device") : null), h("div", { class: "muted" }, `${x.ip} · last active ${fmtDate(x.last_seen)}`)), x.current ? null : h("button", { class: "btn sm danger", type: "button", onclick: guard(async () => { await api("/account/sessions/" + x.id, { method: "DELETE" }); route(); }) }, "Revoke"))));
-  return h("div", { class: "stack" }, profile, pwf, sess);
+  return h("div", { class: "stack" }, profile, tgPanel, pwf, sess);
 }
 
 /* ---------- Support ---------- */
@@ -719,7 +811,14 @@ async function boot() {
   const params = new URLSearchParams(location.search);
   if (params.get("ref")) store.set("ref", params.get("ref").slice(0, 20));
   state.country = store.get("country", "");
-  $("#themeBtn").addEventListener("click", toggleTheme); $("#themeBtn2").addEventListener("click", toggleTheme); $("#authBtn").addEventListener("click", () => authDialog("login")); $("#notifBtn").addEventListener("click", openNotifications);
+  $("#themeBtn").addEventListener("click", toggleTheme); $("#themeBtn2").addEventListener("click", toggleTheme); $("#authBtn").addEventListener("click", () => {
+  if (state.user) { location.hash = "#/account"; return; }
+  if (state.tg && state.tg.initData) {
+    authenticateWithTelegram().then((ok) => { if (ok) toast("Signed in via Telegram", "ok"); else toast("Telegram sign-in failed", "bad"); });
+    return;
+  }
+  authDialog("login");
+}); $("#notifBtn").addEventListener("click", openNotifications);
   $("#menuBtn").addEventListener("click", (e) => { const n = $("#catnav"); const open = n.classList.toggle("hide") === false; e.currentTarget.setAttribute("aria-expanded", String(open)); });
   if (matchMedia("(max-width: 859px)").matches) $("#catnav").classList.add("hide");
   setupSearch();

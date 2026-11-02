@@ -42,6 +42,7 @@ import security as sec
 from config import ConfigError, settings
 from security import utcnow
 import security_events as sevt
+import telegram_auth as tgauth
 
 log = logging.getLogger("market")
 BASE_DIR = Path(__file__).resolve().parent
@@ -74,7 +75,8 @@ async def ensure_indexes(d: Any) -> None:
     """Idempotent index creation (also run on Heroku release phase)."""
     ix = lambda col, keys, **kw: d[col].create_index(keys, **kw)  # noqa: E731
     A, D = ASCENDING, DESCENDING
-    await ix("users", [("email", A)], unique=True)
+    await ix("users", [("email", A)], unique=True, sparse=True)
+    await ix("users", [("telegram_id", A)], unique=True, sparse=True)
     await ix("users", [("referral_code", A)], unique=True, sparse=True)
     await ix("users", [("reset.token_hash", A)], sparse=True)
     await ix("users", [("created_at", D)])
@@ -82,7 +84,6 @@ async def ensure_indexes(d: Any) -> None:
     await ix("invitations", [("code_hash", A)], unique=True, sparse=True)
     await ix("sessions", [("expires_at", A)], expireAfterSeconds=0)
     await ix("sessions", [("user_id", A)])
-    await ix("users", [("telegram_id", A)], unique=True, sparse=True)
     await ix("rate_limits", [("expires_at", A)], expireAfterSeconds=0)
     await ix("products", [("slug", A)], unique=True)
     await ix("products", [("name", "text"), ("short_description", "text"), ("search_blob", "text")],
@@ -354,12 +355,7 @@ async def optional_user(request: Request) -> Optional[dict]:
 
 def require_role(minimum: str):
     async def dep(request: Request, user: dict = Depends(current_user)) -> dict:
-        role = user.get("role", "customer")
-        tg_id = str(user.get("telegram_id") or "")
-        if tg_id and tg_id in set(settings.telegram_admin_ids):
-            role = "admin" if ROLE_LEVEL.get(role, 0) < ROLE_LEVEL["admin"] else role
-            user = {**user, "role": role}
-        if ROLE_LEVEL.get(role, 0) < ROLE_LEVEL[minimum]:
+        if ROLE_LEVEL.get(user.get("role", "customer"), 0) < ROLE_LEVEL[minimum]:
             await audit(request, "authz.denied", user["_id"], meta={"path": request.url.path}, category="security", level="warn")
             raise HTTPException(403, "Insufficient permissions")
         return user
@@ -1426,20 +1422,11 @@ def set_session_cookie(response: Response, token: str) -> None:
 
 def me_payload(user: dict, tiers: List[dict]) -> dict:
     tier = tier_for(user, tiers)
-    tg_id = str(user.get("telegram_id") or "")
-    is_tg_admin = bool(tg_id and tg_id in set(settings.telegram_admin_ids))
-    role = user.get("role", "customer")
-    if is_tg_admin and ROLE_LEVEL.get(role, 0) < ROLE_LEVEL["admin"]:
-        role = "admin"
     return {
         "id": str(user["_id"]),
         "email": user.get("email") or "",
         "name": user.get("name", ""),
-        "role": role,
-        "is_admin": is_tg_admin or ROLE_LEVEL.get(role, 0) >= ROLE_LEVEL["admin"],
-        "telegram_id": tg_id or None,
-        "photo_url": user.get("photo_url") or None,
-        "username": user.get("telegram_username") or None,
+        "role": user.get("role", "customer"),
         "country": user.get("country"),
         "theme": user.get("theme"),
         "notifications": user.get("notifications", {}),
@@ -1448,6 +1435,11 @@ def me_payload(user: dict, tiers: List[dict]) -> dict:
         "referral_code": user.get("referral_code"),
         "wishlist": [str(x) for x in user.get("wishlist", [])],
         "created_at": iso(user.get("created_at")),
+        "telegram_id": str(user["telegram_id"]) if user.get("telegram_id") is not None else None,
+        "telegram_username": user.get("telegram_username") or None,
+        "telegram_photo_url": user.get("telegram_photo_url") or None,
+        "auth_provider": user.get("auth_provider") or ("telegram" if user.get("telegram_id") is not None else "password"),
+        "is_admin": ROLE_LEVEL.get(user.get("role", "customer"), 0) >= ROLE_LEVEL["admin"],
     }
 
 
@@ -1461,326 +1453,7 @@ async def health() -> dict:
         except Exception:
             ok = False
     return {"status": "ok" if ok else "degraded", "database": "up" if ok else "down", "payments_configured": settings.plisio_enabled,
-            "uploads_configured": settings.imgbb_enabled, "environment": settings.app_env}
-
-
-
-# ---- telegram mini app auth -------------------------------------------------
-class TelegramAuthIn(Strict):
-    init_data: str = Field(min_length=10, max_length=4096)
-
-
-def _parse_telegram_init_data(init_data: str) -> dict:
-    """Validate Telegram WebApp initData (HMAC-SHA256) and return parsed user dict."""
-    token = settings.telegram_bot_token
-    if not token:
-        raise HTTPException(503, "TELEGRAM_BOT_TOKEN is not configured")
-    from urllib.parse import parse_qsl, unquote_plus
-    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
-    recv_hash = pairs.pop("hash", None)
-    if not recv_hash:
-        raise HTTPException(401, "Missing Telegram hash")
-    data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
-    secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
-    calc = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(calc, recv_hash):
-        raise HTTPException(401, "Invalid Telegram initData signature")
-    auth_date = int(pairs.get("auth_date") or 0)
-    if abs(int(time.time()) - auth_date) > 86400:
-        raise HTTPException(401, "Telegram initData expired")
-    user_raw = pairs.get("user")
-    if not user_raw:
-        raise HTTPException(401, "Telegram user missing")
-    try:
-        user = json.loads(user_raw)
-    except Exception:
-        raise HTTPException(401, "Telegram user payload invalid")
-    if not user.get("id"):
-        raise HTTPException(401, "Telegram user id missing")
-    return user
-
-
-@api.post("/auth/telegram")
-async def auth_telegram(body: TelegramAuthIn, request: Request, response: Response) -> dict:
-    """Silent login via Telegram Mini App initData. No email/password."""
-    tg = _parse_telegram_init_data(body.init_data)
-    tg_id = str(tg["id"])
-    name = " ".join(x for x in [tg.get("first_name") or "", tg.get("last_name") or ""] if x).strip() or (tg.get("username") or f"tg_{tg_id}")
-    username = (tg.get("username") or "")[:64]
-    photo = (tg.get("photo_url") or "")[:500]
-    is_admin = tg_id in set(settings.telegram_admin_ids)
-    role = "admin" if is_admin else "customer"
-
-    user = await db()["users"].find_one({"telegram_id": tg_id})
-    now = utcnow()
-    if not user:
-        # also try legacy email key for same tg
-        user = {
-            "telegram_id": tg_id,
-            "telegram_username": username,
-            "photo_url": photo,
-            "email": f"tg_{tg_id}@telegram.local",
-            "name": name[:80],
-            "password_hash": sec.hash_password(secrets.token_urlsafe(32)),
-            "role": role,
-            "status": "active",
-            "created_at": now,
-            "lifetime_spend_minor": 0,
-            "points_balance": 0,
-            "referral_code": secrets.token_hex(4).upper(),
-            "wishlist": [],
-            "notifications": {"orders": True, "promotions": False},
-            "theme": None,
-            "country": None,
-        }
-        res = await db()["users"].insert_one(user)
-        user["_id"] = res.inserted_id
-    else:
-        updates = {
-            "name": name[:80],
-            "telegram_username": username,
-            "photo_url": photo,
-            "last_login_at": now,
-        }
-        if is_admin and user.get("role") not in STAFF_ROLES:
-            updates["role"] = "admin"
-        elif not is_admin and user.get("role") in STAFF_ROLES and str(user.get("telegram_id")) not in set(settings.telegram_admin_ids):
-            # keep existing staff if they were promoted manually; only force admin when listed
-            pass
-        await db()["users"].update_one({"_id": user["_id"]}, {"$set": updates})
-        user = await db()["users"].find_one({"_id": user["_id"]})
-
-    # rotate any existing cookie session
-    await S.sessions.revoke(request.cookies.get(settings.cookie_name))
-    token, sess = await S.sessions.create(user, request)
-    set_session_cookie(response, token)
-    await audit(request, "auth.telegram", user["_id"], category="security", meta={"telegram_id": tg_id, "is_admin": is_admin})
-    return {
-        "user": me_payload(user, await get_tiers()),
-        "csrf": sess["csrf"],
-        "token": token,
-        "is_admin": is_admin,
-    }
-
-
-class BulkProductLine(Strict):
-    """One raw product line before Gemini normalisation."""
-    raw: str = Field(min_length=5, max_length=2000)
-
-
-class BulkProductsIn(Strict):
-    """Paste many lines: cc | exp | cvv | address | city | state | zip | country | extra"""
-    text: str = Field(min_length=5, max_length=500_000)
-    price: str = Field(default="10.00")
-    category_id: Optional[str] = None
-    status: Literal["draft", "published"] = "published"
-    default_country: str = Field(default="US", min_length=2, max_length=2)
-
-
-def _split_bulk_lines(text: str) -> List[str]:
-    lines = []
-    for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        ln = ln.strip()
-        if not ln or ln.startswith("#"):
-            continue
-        lines.append(ln)
-    return lines
-
-
-def _parse_pipe_line(line: str) -> dict:
-    parts = [p.strip() for p in line.split("|")]
-    while len(parts) < 9:
-        parts.append("")
-    keys = ["cc", "exp", "cvv", "address", "city", "state", "zip", "country", "extra"]
-    return {k: parts[i] for i, k in enumerate(keys)}
-
-
-async def _gemini_normalize_rows(rows: List[dict]) -> List[dict]:
-    """Use Gemini to clean country codes, fill missing fields, produce short product names."""
-    if not settings.gemini_api_key:
-        return _local_normalize_rows(rows)
-
-    prompt = (
-        "You normalise bulk card-product rows for a private inventory tool. "
-        "Input is JSON array of objects with keys: cc, exp, cvv, address, city, state, zip, country, extra. "
-        "Return ONLY a JSON array (no markdown) of objects with keys: "
-        "cc, exp, cvv, address, city, state, zip, country (ISO-3166 alpha-2), extra, name (short product title). "
-        "Rules: country must be valid 2-letter code; guess from city/state/zip when missing; "
-        "name like 'US Visa 414720' using first 6 digits of cc and country; keep original secrets intact; "
-        "do not invent card numbers. Input:\n" + json.dumps(rows[:120], ensure_ascii=False)
-    )
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
-    }
-    try:
-        assert S.http is not None
-        resp = await S.http.post(url, json=payload, timeout=60.0)
-        data = resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        # strip accidental fences
-        text = text.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-        parsed = json.loads(text)
-        if not isinstance(parsed, list):
-            raise ValueError("not a list")
-        return parsed
-    except Exception as exc:
-        log.warning("gemini bulk normalize failed: %s", type(exc).__name__)
-        return _local_normalize_rows(rows)
-
-
-def _local_normalize_rows(rows: List[dict]) -> List[dict]:
-    out = []
-    for r in rows:
-        country = (r.get("country") or "US").upper()[:2]
-        if len(country) != 2 or not country.isalpha():
-            country = "US"
-        cc = re.sub(r"\D", "", str(r.get("cc") or ""))
-        name = f"{country} • {(cc[:6] + '******') if len(cc) >= 6 else 'CARD'}"
-        out.append({**r, "country": country, "name": name, "cc": cc or r.get("cc", "")})
-    return out
-
-
-async def _gemini_normalize_rows_safe(rows: List[dict]) -> List[dict]:
-    try:
-        return await _gemini_normalize_rows(rows)
-    except Exception:
-        return _local_normalize_rows(rows)
-
-
-@admin.post("/products/bulk")
-async def admin_products_bulk(body: BulkProductsIn, request: Request, user: dict = Depends(admin_user)) -> dict:
-    """Parse pasted pipe-delimited inventory, optionally enrich with Gemini, insert products."""
-    lines = _split_bulk_lines(body.text)
-    if not lines:
-        raise HTTPException(422, "No product lines found")
-    if len(lines) > 500:
-        raise HTTPException(422, "Max 500 lines per bulk upload")
-
-    raw_rows = [_parse_pipe_line(ln) for ln in lines]
-    # chunk Gemini calls
-    normalized: List[dict] = []
-    for i in range(0, len(raw_rows), 80):
-        chunk = await _gemini_normalize_rows_safe(raw_rows[i : i + 80])
-        normalized.extend(chunk)
-
-    # ensure category
-    cat_id = None
-    if body.category_id:
-        cat_id = oid(body.category_id, "category_id")
-    else:
-        cat = await db()["categories"].find_one({"name": {"$regex": "^cards?$", "$options": "i"}})
-        if not cat:
-            cat = {"name": "Cards", "slug": "cards", "enabled": True, "featured": True, "order": 0, "created_at": utcnow()}
-            ins = await db()["categories"].insert_one(cat)
-            cat["_id"] = ins.inserted_id
-        cat_id = cat["_id"]
-
-    ctx = await catalog_ctx()
-    price_minor = money_to_minor(body.price, "Price", allow_zero=False)
-    created = []
-    errors = []
-    for idx, row in enumerate(normalized):
-        try:
-            country = str(row.get("country") or body.default_country).upper()[:2]
-            if country not in ctx["countries"]:
-                # auto-enable unknown country entry
-                await db()["countries"].update_one(
-                    {"code": country},
-                    {"$setOnInsert": {"code": country, "name": country, "region": "", "enabled": True, "order": 999}},
-                    upsert=True,
-                )
-                invalidate_cache()
-                ctx = await catalog_ctx()
-
-            cc = str(row.get("cc") or "").strip()
-            exp = str(row.get("exp") or "").strip()
-            cvv = str(row.get("cvv") or "").strip()
-            address = str(row.get("address") or "").strip()
-            city = str(row.get("city") or "").strip()
-            state = str(row.get("state") or "").strip()
-            zipc = str(row.get("zip") or "").strip()
-            extra = str(row.get("extra") or "").strip()
-            name = sec.clean_text(str(row.get("name") or f"{country} CARD"), 140)
-            digits = re.sub(r"\D", "", cc)
-            delivery = [
-                {"label": "CC", "value": cc, "kind": "secret"},
-                {"label": "EXP", "value": exp, "kind": "text"},
-                {"label": "CVV", "value": cvv, "kind": "secret"},
-            ]
-            if address:
-                delivery.append({"label": "Address", "value": address, "kind": "text"})
-            if city:
-                delivery.append({"label": "City", "value": city, "kind": "text"})
-            if state:
-                delivery.append({"label": "State", "value": state, "kind": "text"})
-            if zipc:
-                delivery.append({"label": "ZIP", "value": zipc, "kind": "text"})
-            if extra:
-                delivery.append({"label": "Extra", "value": extra, "kind": "text"})
-
-            slug_base = slugify(f"{country}-{digits[:6] if digits else 'card'}-{secrets.token_hex(3)}")
-            doc = {
-                "name": name,
-                "name_lc": name.lower(),
-                "slug": slug_base,
-                "short_description": f"{country} · {mask_cc_value('cc', cc)}",
-                "description": extra or f"{city} {state} {zipc}".strip(),
-                "price_minor": price_minor,
-                "discount_percent": 0,
-                "final_price_minor": price_minor,
-                "country": country,
-                "category_id": cat_id,
-                "subcategory": "",
-                "images": [],
-                "variants": [{"sku": "DEFAULT", "label": "Standard", "price_minor": None, "stock": 1, "available": 1, "reserved": 0, "sold": 0}],
-                "low_stock_threshold": 0,
-                "fields": {
-                    "bin": digits[:6] if len(digits) >= 6 else digits,
-                    "exp": exp,
-                    "city": city,
-                    "state": state,
-                    "zip": zipc,
-                },
-                "tags": [country, "bulk"],
-                "featured": False,
-                "status": body.status,
-                "delivery_info": "Instant digital delivery after payment.",
-                "refund_policy": "",
-                "delivery_fields": delivery,
-                "search_blob": " ".join([name, country, digits[:6], city, state]),
-                "sold_total": 0,
-                "rating_sum": 0,
-                "rating_count": 0,
-                "created_by": user["_id"],
-                "created_at": utcnow(),
-                "updated_at": utcnow(),
-            }
-            res = await db()["products"].insert_one(doc)
-            await log_movement(res.inserted_id, "DEFAULT", "initial", 1, 1, 0, "bulk import", user["_id"])
-            created.append({"id": str(res.inserted_id), "name": name, "country": country})
-        except Exception as exc:
-            errors.append({"line": idx + 1, "error": str(exc)[:200]})
-
-    await audit(request, "product.bulk_create", user["_id"], meta={"created": len(created), "errors": len(errors)})
-    invalidate_cache()
-    return {"created": len(created), "errors": errors, "items": created[:50]}
-
-
-@admin.delete("/products/{pid}/hard")
-async def admin_product_hard_delete(pid: str, request: Request, user: dict = Depends(admin_user)) -> dict:
-    """Permanently remove a product (not just archive)."""
-    p = await db()["products"].find_one({"_id": oid(pid)})
-    if not p:
-        raise HTTPException(404, "Product not found")
-    await db()["products"].delete_one({"_id": p["_id"]})
-    await audit(request, "product.hard_delete", user["_id"], pid)
-    invalidate_cache()
-    return {"ok": True}
+            "uploads_configured": settings.imgbb_enabled, "telegram_configured": settings.telegram_enabled, "environment": settings.app_env}
 
 
 @api.get("/config")
@@ -1799,6 +1472,7 @@ async def public_config() -> dict:
     return {"brand_name": site.get("brand_name"), "tagline": site.get("tagline"), "hero_title": site.get("hero_title"), "hero_subtitle": site.get("hero_subtitle"),
             "support_url": site.get("support_url"), "support_email": site.get("support_email"), "terms_url": site.get("terms_url"),
             "invite_only": site.get("invite_only", False), "currency": settings.default_currency, "payments_enabled": bool((site or {}).get("plisio_api_key") or settings.plisio_api_key),
+            "telegram_enabled": settings.telegram_enabled, "telegram_miniapp_mode": settings.telegram_miniapp_mode, "telegram_bot_username": settings.telegram_bot_username or "",
             "mastercard_logo_url": (site or {}).get("mastercard_logo_url") or "",
             "visa_logo_url": (site or {}).get("visa_logo_url") or "",
             "brands": brands,
@@ -1824,6 +1498,121 @@ async def get_captcha_svg(response: Response) -> Response:
     return Response(svg, media_type="image/svg+xml", headers={"Cache-Control": "no-store", "X-Captcha-Id": c["id"]})
 
 
+
+
+
+
+# ---- Telegram Mini App auth -------------------------------------------------
+class TelegramAuthIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    init_data: str = Field(min_length=10, max_length=8192)
+
+
+async def upsert_telegram_user(tg_user: dict, request: Request) -> dict:
+    """Create or update a user from verified Telegram identity. Role from server allowlist only."""
+    tid = int(tg_user["id"])
+    tid_str = str(tid)
+    name = tgauth.display_name(tg_user)
+    username = (tg_user.get("username") or "").strip()[:64] or None
+    photo = tgauth.telegram_photo_url(tg_user)
+    is_admin = tid_str in settings.telegram_admin_id_set
+    role = "superadmin" if is_admin else "customer"
+
+    existing = await db()["users"].find_one({"telegram_id": tid})
+    now = utcnow()
+    if existing:
+        upd: Dict[str, Any] = {
+            "name": name,
+            "telegram_username": username,
+            "telegram_photo_url": photo,
+            "auth_provider": "telegram",
+            "last_telegram_auth_at": now,
+        }
+        # Promote / demote only via allowlist (never trust client)
+        if is_admin and existing.get("role") not in STAFF_ROLES:
+            upd["role"] = "superadmin"
+        elif not is_admin and existing.get("role") in STAFF_ROLES and existing.get("auth_provider") == "telegram":
+            # Only auto-demote pure Telegram staff; password-created staff keep role
+            upd["role"] = "customer"
+        if existing.get("status") != "active":
+            raise HTTPException(403, "Account is not active")
+        await db()["users"].update_one({"_id": existing["_id"]}, {"$set": upd})
+        existing.update(upd)
+        return existing
+
+    # Synthetic unique email for sparse unique index compatibility
+    email = f"tg{tid}@telegram.local"
+    doc = {
+        "email": email,
+        "name": name,
+        "password_hash": None,
+        "role": role,
+        "status": "active",
+        "created_at": now,
+        "lifetime_spend_minor": 0,
+        "points_balance": 0,
+        "referral_code": secrets.token_hex(4).upper(),
+        "wishlist": [],
+        "notifications": {"orders": True, "promotions": False},
+        "theme": None,
+        "country": None,
+        "telegram_id": tid,
+        "telegram_username": username,
+        "telegram_photo_url": photo,
+        "auth_provider": "telegram",
+        "last_telegram_auth_at": now,
+    }
+    try:
+        res = await db()["users"].insert_one(doc)
+    except DuplicateKeyError:
+        # Race: another request created the same telegram_id
+        existing = await db()["users"].find_one({"telegram_id": tid})
+        if not existing:
+            raise HTTPException(409, "Unable to create Telegram account")
+        return existing
+    doc["_id"] = res.inserted_id
+    return doc
+
+
+@api.post("/auth/telegram")
+async def auth_telegram(body: TelegramAuthIn, request: Request, response: Response) -> dict:
+    """Verify Telegram WebApp initData and issue an application session."""
+    await sensitive(request, "telegram_auth")
+    if not settings.telegram_enabled:
+        raise HTTPException(503, "Telegram authentication is not configured")
+    parsed = tgauth.validate_init_data(
+        body.init_data,
+        settings.telegram_bot_token,
+        max_age_seconds=settings.telegram_init_data_max_age,
+    )
+    tg_user = parsed.get("user") or {}
+    if not tg_user.get("id"):
+        raise HTTPException(401, "Telegram user data missing from initData")
+    user = await upsert_telegram_user(tg_user, request)
+    token, sess = await S.sessions.create(user, request)
+    set_session_cookie(response, token)
+    await audit(
+        request,
+        "auth.telegram_login",
+        user["_id"],
+        meta={"telegram_id": str(tg_user["id"]), "role": user.get("role")},
+        category="security",
+    )
+    return {
+        "user": me_payload(user, await get_tiers()),
+        "csrf": sess["csrf"],
+        "expires_at": iso(sess["expires_at"]),
+        "token": token,  # for Bearer use inside Telegram WebView if cookies restricted
+    }
+
+
+@api.get("/auth/telegram/status")
+async def telegram_status() -> dict:
+    return {
+        "enabled": settings.telegram_enabled,
+        "miniapp_mode": settings.telegram_miniapp_mode,
+        "bot_username": settings.telegram_bot_username or None,
+    }
 
 
 

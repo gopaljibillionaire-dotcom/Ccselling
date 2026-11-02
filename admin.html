@@ -312,7 +312,7 @@ nav.side button { justify-content: flex-start; }
 <div id="loginView" class="login">
   <div class="panel">
     <h1>Administration</h1>
-    <p class="muted small">Sign in with your staff account. Admins need multi‑factor authentication. This page holds no credentials; every action is authorised by the backend.</p>
+    <p class="muted small">Sign in with your staff account, or open this page as a Telegram Mini App with an allowlisted Telegram admin ID. Password MFA remains available for non-Telegram staff. This page holds no credentials; every action is authorised by the backend.</p>
     <div class="f"><label for="apiBase">Server URL</label><input id="apiBase" type="url" placeholder="https://your-app.herokuapp.com" autocomplete="off"><div class="hint">Leave blank when this page is served by the backend itself.</div></div>
     <form id="loginForm" novalidate>
       <div class="f"><label for="em">Email</label><input id="em" type="email" autocomplete="username" required></div>
@@ -338,6 +338,29 @@ nav.side button { justify-content: flex-start; }
 (() => {
 const $ = (s, r = document) => r.querySelector(s);
 const st = { token: null, csrf: null, user: null, base: "", pending: null, countries: [], cats: [] };
+async function tryTelegramAdminAuth() {
+  try {
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (!tg || !tg.initData) return false;
+    tg.ready(); try { tg.expand(); } catch (e) {}
+    const r = await fetch((st.base || "") + "/api/auth/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ init_data: tg.initData }),
+      credentials: "same-origin"
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return false;
+    if (!data.user || !["admin", "superadmin", "support"].includes(data.user.role)) {
+      $("#loginErr").textContent = "This Telegram account is not authorised as staff.";
+      return false;
+    }
+    st.token = data.token; st.csrf = data.csrf; st.user = data.user;
+    SS.set("tok", data.token); SS.set("csrf", data.csrf);
+    return true;
+  } catch (e) { return false; }
+}
+
 const SS = { get(k) { try { return sessionStorage.getItem(k); } catch { return null; } }, set(k, v) { try { sessionStorage.setItem(k, v); } catch {} }, del(k) { try { sessionStorage.removeItem(k); } catch {} } };
 function h(tag, a, ...kids) { const e = document.createElement(tag); for (const [k, v] of Object.entries(a || {})) { if (v == null || v === false) continue; if (k === "class") e.className = v; else if (k.startsWith("on") && typeof v === "function") e.addEventListener(k.slice(2), v); else if (v === true) e.setAttribute(k, ""); else e.setAttribute(k, v); } for (const c of kids.flat()) if (c != null && c !== false) e.append(c.nodeType ? c : document.createTextNode(String(c))); return e; }
 const clear = (e) => { while (e.firstChild) e.removeChild(e.firstChild); return e; };
@@ -500,7 +523,7 @@ $("#loginForm").addEventListener("submit", async (e) => {
 });
 function resetLogin() { st.pending = null; st.token = null; $("#capBox").classList.remove("hide"); loadCap(); $("#mfaBox").classList.add("hide"); $("#mfaSetup").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; }
 async function finish(r) {
-  if (!(r.user.is_admin || ["support", "admin", "superadmin"].includes(r.user.role))) { st.token = null; throw new Error("This account has no administrative access."); }
+  if (!["support", "admin", "superadmin"].includes(r.user.role)) { st.token = null; throw new Error("This account has no administrative access."); }
   st.token = r.token; st.csrf = r.csrf; st.user = r.user; st.pending = null; SS.set("tok", r.token); resetLoginUi(); await start();
 }
 function resetLoginUi() { $("#mfaBox").classList.add("hide"); $("#loginBtn").textContent = "Continue"; $("#otp").value = ""; $("#pw").value = ""; }
@@ -514,30 +537,9 @@ const SECTIONS = [
   ["invites", "Invitations", "✉"], ["tiers", "Membership", "🏅"], ["tickets", "Support", "💬"], ["push", "Push notify", "🔔"],
   ["reviews", "Reviews", "⭐"], ["security", "Security", "🛡"], ["settings", "Settings", "🔧"]
 ];
-const isAdmin = () => !!(st.user && (st.user.is_admin || ["admin", "superadmin"].includes(st.user.role)));
-
-async function telegramAdminBoot() {
-  const tg = window.Telegram && window.Telegram.WebApp;
-  if (!tg || !tg.initData) return false;
-  try { tg.ready(); tg.expand(); } catch(e) {}
-  try {
-    const r = await api("/auth/telegram", { method: "POST", body: { init_data: tg.initData } });
-    if (!(r.user && (r.user.is_admin || ["admin","superadmin","support"].includes(r.user.role)))) {
-      throw new Error("Your Telegram account is not an admin");
-    }
-    st.token = r.token || null;
-    st.user = r.user;
-    st.csrf = r.csrf;
-    await start();
-    return true;
-  } catch (e) {
-    $("#loginErr").textContent = e.message || "Telegram admin auth failed";
-    return false;
-  }
-}
-
+const isAdmin = () => ["admin", "superadmin"].includes(st.user.role);
 async function start() {
-  $("#loginView").classList.add("hide"); $("#appView").classList.remove("hide"); $("#who").textContent = `${st.user.username ? "@"+st.user.username : (st.user.name || st.user.email)} · ${st.user.role}`;
+  $("#loginView").classList.add("hide"); $("#appView").classList.remove("hide"); $("#who").textContent = `${st.user.email} · ${st.user.role}`;
   const [c, k] = await Promise.all([api("/admin/countries"), api("/admin/categories")]); st.countries = c.countries; st.cats = k.categories;
   const side = clear($("#side"));
   side.append(h("div", { class: "brand" }, h("div", { class: "logo" }, "C"), "CCS Admin"));
@@ -567,31 +569,9 @@ VIEWS.overview = async () => {
 /* products + dynamic form */
 VIEWS.products = async () => {
   let q = "", status = ""; const box = h("div"); const qi = h("input", { placeholder: "Search by name" }); const ss = h("select", null, ["", "draft", "published", "archived"].map((x) => h("option", { value: x }, x || "All statuses")));
-  async function load() { const r = await api(`/admin/products?q=${encodeURIComponent(q)}&status=${status}`); clear(box).append(table(["Product", "Status", "Price", "Availability", ""], r.items.map((p) => h("tr", null, h("td", null, p.name), h("td", null, chip(p.status)), h("td", null, p.price, p.discount_percent ? ` (-${p.discount_percent}%)` : ""), h("td", null, chip(p.availability === "in_stock" ? "ok" : p.availability === "low_stock" ? "pending" : "failed"), " ", p.availability), h("td", null, h("div", { class: "row" }, h("button", { class: "btn sm", type: "button", onclick: () => productForm(p.id) }, "Edit"), isAdmin() ? h("button", { class: "btn sm", type: "button", onclick: go(async () => { await api(`/admin/products/${p.id}/status`, { method: "POST", body: { status: p.status === "published" ? "draft" : "published" } }); load(); }) }, p.status === "published" ? "Unpublish" : "Publish") : null, isAdmin() ? h("button", { class: "btn sm danger", type: "button", onclick: go(async () => { if (await confirmBox(`Archive “${p.name}”? It will disappear from the storefront.`)) { await api(`/admin/products/${p.id}`, { method: "DELETE" }); load(); } }) }, "Archive") : null, isAdmin() ? h("button", { class: "btn sm danger", type: "button", onclick: go(async () => { if (await confirmBox(`Permanently delete “${p.name}”?`)) { await api(`/admin/products/${p.id}/hard`, { method: "DELETE" }); load(); } }) }, "Delete") : null)))))); }
+  async function load() { const r = await api(`/admin/products?q=${encodeURIComponent(q)}&status=${status}`); clear(box).append(table(["Product", "Status", "Price", "Availability", ""], r.items.map((p) => h("tr", null, h("td", null, p.name), h("td", null, chip(p.status)), h("td", null, p.price, p.discount_percent ? ` (-${p.discount_percent}%)` : ""), h("td", null, chip(p.availability === "in_stock" ? "ok" : p.availability === "low_stock" ? "pending" : "failed"), " ", p.availability), h("td", null, h("div", { class: "row" }, h("button", { class: "btn sm", type: "button", onclick: () => productForm(p.id) }, "Edit"), isAdmin() ? h("button", { class: "btn sm", type: "button", onclick: go(async () => { await api(`/admin/products/${p.id}/status`, { method: "POST", body: { status: p.status === "published" ? "draft" : "published" } }); load(); }) }, p.status === "published" ? "Unpublish" : "Publish") : null, isAdmin() ? h("button", { class: "btn sm danger", type: "button", onclick: go(async () => { if (await confirmBox(`Archive “${p.name}”? It will disappear from the storefront.`)) { await api(`/admin/products/${p.id}`, { method: "DELETE" }); load(); } }) }, "Archive") : null)))))); }
   qi.addEventListener("input", () => { q = qi.value; clearTimeout(qi._t); qi._t = setTimeout(go(load), 300); }); ss.addEventListener("change", () => { status = ss.value; go(load)(); });
-  await load();
-  const bulkTa = h("textarea", { rows: "8", placeholder: "Paste bulk lines:\ncc | exp | cvv | address | city | state | zip | country | extra info", style: "width:100%;font-family:ui-monospace,monospace;font-size:12px" });
-  const priceIn = h("input", { value: "10.00", style: "width:100px", placeholder: "Price" });
-  const statusSel = h("select", null, h("option", { value: "published" }, "published"), h("option", { value: "draft" }, "draft"));
-  const bulkBtn = h("button", { class: "btn primary", type: "button" }, "Import bulk (Gemini)");
-  bulkBtn.onclick = go(async () => {
-    const text = bulkTa.value.trim();
-    if (!text) throw new Error("Paste at least one line");
-    const r = await api("/admin/products/bulk", { method: "POST", body: { text, price: priceIn.value || "10.00", status: statusSel.value } });
-    toast(`Created ${r.created} product(s)` + (r.errors && r.errors.length ? `, ${r.errors.length} error(s)` : ""), r.errors && r.errors.length ? "bad" : "ok");
-    bulkTa.value = "";
-    await load();
-  });
-  // hard delete in table: enhance archive button already there - add Hard delete
-  return h("div", null,
-    h("div", { class: "row between panel" }, h("div", { class: "row grow" }, qi, ss), isAdmin() ? h("button", { class: "btn primary", type: "button", onclick: () => productForm(null) }, "+ New product") : null),
-    isAdmin() ? h("div", { class: "panel stack" },
-      h("h3", null, "Bulk import"),
-      h("p", { class: "muted small" }, "Format: cc | exp | cvv | address | city | state | zip | country | extra info — one product per line. Gemini fills country codes and titles when GEMINI_API_KEY is set."),
-      bulkTa,
-      h("div", { class: "row wrap" }, h("label", { class: "small" }, "Price ", priceIn), h("label", { class: "small" }, "Status ", statusSel), bulkBtn)
-    ) : null,
-    h("div", { class: "panel" }, box));
+  await load(); return h("div", null, h("div", { class: "row between panel" }, h("div", { class: "row grow" }, qi, ss), isAdmin() ? h("button", { class: "btn primary", type: "button", onclick: () => productForm(null) }, "+ New product") : null), h("div", { class: "panel" }, box));
 };
 async function productForm(id) {
   const existing = id ? await api("/admin/products/" + id) : null; const root = h("div"); const dyn = h("div"); const fv = {}; let images = existing ? existing.images.map((i) => ({ ...i })) : []; let variants = existing ? existing.variants.map((v) => ({ sku: v.sku, label: v.label, price: v.price_minor ? (v.price_minor / 100).toFixed(2) : "", stock: v.stock })) : [{ sku: "DEFAULT", label: "Standard", price: "", stock: 1 }];
@@ -992,23 +972,28 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", function () { try { loadCap(); } catch (e) { console.error(e); } });
 }
 (async () => {
-  try {
-    const viaTg = await telegramAdminBoot();
-    if (viaTg) return;
-    const t = SS.get("tok");
-    if (!t) return;
+  const t = SS.get("tok");
+  if (t) {
     st.token = t;
-    const r = await api("/auth/me");
-    if (!["support", "admin", "superadmin"].includes(r.user.role) && !r.user.is_admin) {
-      signedOut();
+    try {
+      const r = await api("/auth/me");
+      st.user = r.user; st.csrf = r.csrf;
+      if (st.user && ["admin", "superadmin", "support"].includes(st.user.role)) {
+        await start();
+        return;
+      }
+      signedOut("Staff access required.");
       return;
+    } catch {
+      signedOut();
     }
-    st.user = r.user;
-    st.csrf = r.csrf;
-    await start();
-  } catch (e) {
-    signedOut();
   }
+  // Auto-auth when opened as Telegram Mini App by an allowlisted admin
+  const ok = await tryTelegramAdminAuth();
+  if (ok) {
+    try { await start(); } catch (e) { signedOut(e.message || "Failed to open admin."); }
+  }
+})();
 })();
 </script>
 </body>

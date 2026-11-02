@@ -605,36 +605,19 @@ body { padding-bottom: 72px; }
   .products.tableish .actions { flex-wrap: wrap; justify-content: flex-end; }
 }
 
-/* Telegram mini-app user chip */
-.tg-user {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(34, 211, 238, 0.1);
-  border: 1px solid rgba(34, 211, 238, 0.25);
-  max-width: 180px;
+
+/* ---------- Telegram Mini App viewport / safe area (design-preserving) ---------- */
+:root {
+  --tg-viewport-stable: 100dvh;
 }
-.tg-user .tg-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  object-fit: cover;
-  background: #1e293b;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 600;
+html, body {
+  min-height: var(--tg-viewport-stable, 100dvh);
 }
-.tg-user .tg-name {
-  font-size: 0.82rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#adminBtn {
-  border-color: rgba(34, 211, 238, 0.5);
-  color: #22d3ee;
+@supports (padding: env(safe-area-inset-bottom)) {
+  .bottomnav {
+    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+  .header {
+    padding-top: env(safe-area-inset-top);
+  }
 }
