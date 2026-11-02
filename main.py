@@ -1329,7 +1329,11 @@ async def notify_admins_of_sale(order: dict) -> None:
 
 
 async def sweep_once() -> None:
-    """Reconciliation + expiry of unpaid orders (no stock is held for them). Safe to run concurrently on many dynos."""
+    """Reconciliation + expiry of unpaid orders (no stock is held for them). Safe to run concurrently on many dynos.
+
+    Also permanently deletes failed/expired/cancelled payment records older than 24 hours
+    so the admin payments list stays clean.
+    """
     now = utcnow()
     if settings.plisio_enabled:
         async for pay in db()["payment_records"].find({"status": "pending", "provider": "plisio", "created_at": {"$gt": now - timedelta(hours=3)}}).limit(50):
@@ -1346,6 +1350,26 @@ async def sweep_once() -> None:
         fresh = await transition("orders", order["_id"], "expired", note="payment window closed")
         if fresh and pay:
             await transition("payment_records", pay["_id"], "expired", note="payment window closed")
+
+    # Hard-delete failed / expired / cancelled payments after 24h
+    cutoff = now - timedelta(hours=24)
+    del_pay = await db()["payment_records"].delete_many(
+        {"status": {"$in": ["failed", "expired", "cancelled"]}, "updated_at": {"$lt": cutoff}}
+    )
+    # Also catch rows that only have created_at
+    del_pay2 = await db()["payment_records"].delete_many(
+        {
+            "status": {"$in": ["failed", "expired", "cancelled"]},
+            "updated_at": {"$exists": False},
+            "created_at": {"$lt": cutoff},
+        }
+    )
+    if del_pay.deleted_count or del_pay2.deleted_count:
+        log.info(
+            "sweeper purged failed payments: %s + %s",
+            del_pay.deleted_count,
+            del_pay2.deleted_count,
+        )
 
 
 async def sweeper_loop() -> None:
@@ -2255,35 +2279,80 @@ _BIN_COUNTRY_HINT = {
     "4": "US", "5": "US", "3": "US", "6": "US",
 }
 
+_COUNTRY_ALIASES = {
+    "US": "US", "USA": "US", "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US", "AMERICA": "US",
+    "CA": "CA", "CAN": "CA", "CANADA": "CA",
+    "GB": "GB", "UK": "GB", "UNITED KINGDOM": "GB", "GREAT BRITAIN": "GB", "ENGLAND": "GB",
+    "AU": "AU", "AUS": "AU", "AUSTRALIA": "AU",
+    "DE": "DE", "GERMANY": "DE", "DEUTSCHLAND": "DE",
+    "FR": "FR", "FRANCE": "FR",
+    "IN": "IN", "INDIA": "IN",
+    "JP": "JP", "JAPAN": "JP",
+    "BR": "BR", "BRAZIL": "BR", "BRASIL": "BR",
+    "AE": "AE", "UAE": "AE", "UNITED ARAB EMIRATES": "AE",
+    "SG": "SG", "SINGAPORE": "SG",
+    "TR": "TR", "TURKEY": "TR", "TÜRKIYE": "TR", "TURKIYE": "TR",
+    "ES": "ES", "SPAIN": "ES",
+    "IT": "IT", "ITALY": "IT",
+    "NL": "NL", "NETHERLANDS": "NL", "HOLLAND": "NL",
+    "MX": "MX", "MEXICO": "MX",
+    "NZ": "NZ", "NEW ZEALAND": "NZ",
+}
+
+
+def _normalize_country(raw: str) -> str:
+    """Map CA / Canada / canada → CA, etc. Empty if unknown."""
+    s = (raw or "").strip().upper()
+    if not s:
+        return ""
+    if s in _COUNTRY_ALIASES:
+        return _COUNTRY_ALIASES[s]
+    # title-case lookup
+    t = (raw or "").strip().title()
+    if t.upper() in _COUNTRY_ALIASES:
+        return _COUNTRY_ALIASES[t.upper()]
+    if len(s) == 2 and s.isalpha():
+        return s
+    return ""
+
+
 def _parse_bulk_line(raw: str) -> Optional[dict]:
-    """Parse one pipe-separated line into field map. Returns None if unusable."""
+    """Parse one pipe-separated line into field map. Returns None if unusable.
+
+    Accepts full PANs or masked forms like 414720xxxxxx1234 (x/X/* kept as mask).
+    """
     line = (raw or "").strip()
     if not line or line.startswith("#"):
         return None
-    # allow tabs or multiple spaces as separators too
     parts = [p.strip() for p in re.split(r"\s*\|\s*", line)]
     if len(parts) < 3:
-        # try comma
-        parts = [p.strip() for p in line.split(",")]
+        parts = [p.strip() for p in re.split(r"\s*,\s*", line)]
     if len(parts) < 3:
         return None
     while len(parts) < 9:
         parts.append("")
     cc, exp, cvv, address, city, state, zipc, country, extra = parts[:9]
-    digits = re.sub(r"\D", "", cc)
-    if len(digits) < 12 or len(digits) > 19:
+
+    # Keep digits + common mask chars so 414720xxxxxx1234 is valid
+    cc_token = re.sub(r"[^0-9xX*#]", "", cc)
+    digit_count = len(re.sub(r"\D", "", cc_token))
+    if digit_count < 6 or len(cc_token) < 12 or len(cc_token) > 19:
         return None
+    # store as lowercase x for masks; full digits stay digits
+    cc_store = re.sub(r"[X*#]", "x", cc_token)
+
     exp_clean = re.sub(r"[^0-9/]", "", exp)
     if not exp_clean:
         return None
-    cvv_clean = re.sub(r"\D", "", cvv) or cvv
-    country_code = (country or "").strip().upper()
-    if len(country_code) == 2 and country_code.isalpha():
-        pass
-    else:
-        country_code = ""
+    # normalize 0928 → 09/28 when no slash
+    if "/" not in exp_clean and len(exp_clean) in (3, 4):
+        exp_clean = exp_clean[:-2].zfill(2) + "/" + exp_clean[-2:]
+
+    cvv_clean = re.sub(r"[^0-9xX*]", "", cvv) or cvv.strip()
+    country_code = _normalize_country(country)
+
     return {
-        "cc": digits,
+        "cc": cc_store,
         "exp": exp_clean,
         "cvv": cvv_clean,
         "address": address,
@@ -2408,12 +2477,12 @@ async def admin_bulk_cards(body: BulkCardsIn, request: Request, user: dict = Dep
         default_cc = next(iter(ctx["countries"]), "US")
 
     for row in parsed:
-        code = row.get("country_code") or default_cc
+        code = row.get("country_code") or _normalize_country(row.get("country_raw") or "") or default_cc
         if code not in ctx["countries"]:
-            # try match by name fragment
             raw_c = (row.get("country_raw") or "").lower()
             for ccode, cdoc in ctx["countries"].items():
-                if raw_c and raw_c in (cdoc.get("name") or "").lower():
+                name = (cdoc.get("name") or "").lower()
+                if raw_c and (raw_c == name or raw_c in name or name in raw_c):
                     code = ccode
                     break
             else:
@@ -2527,6 +2596,76 @@ async def admin_product_archive(pid: str, request: Request, user: dict = Depends
         raise HTTPException(404, "Product not found")
     await audit(request, "product.archive", user["_id"], pid)
     return {"ok": True}
+
+class BulkDeleteIn(Strict):
+    ids: List[str] = Field(min_length=1, max_length=500)
+    hard: bool = True
+
+
+@admin.post("/products/bulk-delete")
+async def admin_products_bulk_delete(body: BulkDeleteIn, request: Request, user: dict = Depends(admin_user)) -> dict:
+    """Delete many products. hard=True removes documents; hard=False archives."""
+    await sensitive(request, "bulk_delete", str(user["_id"]))
+    ids = []
+    for raw in body.ids:
+        try:
+            ids.append(oid(raw))
+        except HTTPException:
+            continue
+    if not ids:
+        raise HTTPException(422, "No valid product ids")
+    if body.hard:
+        res = await db()["products"].delete_many({"_id": {"$in": ids}})
+        # clean related movements for removed products
+        await db()["inventory_movements"].delete_many({"product_id": {"$in": ids}})
+        await audit(request, "product.bulk_hard_delete", user["_id"], meta={"count": res.deleted_count}, category="inventory")
+        return {"deleted": res.deleted_count, "hard": True}
+    res = await db()["products"].update_many(
+        {"_id": {"$in": ids}},
+        {"$set": {"status": "archived", "updated_at": utcnow()}},
+    )
+    await audit(request, "product.bulk_archive", user["_id"], meta={"count": res.modified_count}, category="inventory")
+    return {"archived": res.modified_count, "hard": False}
+
+
+@admin.get("/products/cards-summary")
+async def admin_cards_summary(user: dict = Depends(staff)) -> dict:
+    """Live card inventory counts for the admin users/overview panels."""
+    pipe = [
+        {"$match": {"status": {"$in": ["published", "draft"]}}},
+        {"$group": {
+            "_id": "$status",
+            "count": {"$sum": 1},
+            "stock": {"$sum": {"$sum": "$variants.available"}},
+        }},
+    ]
+    by_status = {r["_id"]: r async for r in await db()["products"].aggregate(pipe)}
+    published = by_status.get("published", {"count": 0, "stock": 0})
+    draft = by_status.get("draft", {"count": 0, "stock": 0})
+    # active customers with a live session in last 15 min
+    since = utcnow() - timedelta(minutes=15)
+    active_users = await db()["sessions"].distinct(
+        "user_id",
+        {"kind": "full", "last_seen": {"$gt": since}},
+    )
+    # recent paid orders (24h) that delivered card fields
+    day = utcnow() - timedelta(hours=24)
+    sold_24h = await db()["orders"].count_documents({
+        "status": "paid",
+        "$or": [
+            {"paid_at": {"$gt": day}},
+            {"paid_at": {"$exists": False}, "updated_at": {"$gt": day}},
+        ],
+    })
+    return {
+        "cards_published": published.get("count", 0),
+        "cards_draft": draft.get("count", 0),
+        "stock_available": int(published.get("stock", 0) or 0) + int(draft.get("stock", 0) or 0),
+        "active_users": len(active_users),
+        "sold_24h": sold_24h,
+        "generated_at": iso(utcnow()),
+    }
+
 
 
 @admin.post("/uploads")
