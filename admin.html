@@ -305,6 +305,65 @@ dialog { background: linear-gradient(145deg, rgba(30,46,92,.85), rgba(14,24,52,.
 .delprev strong { font-size: 1.02rem; }
 .btn { justify-content: center; }
 nav.side button { justify-content: flex-start; }
+
+/* ---------- Modern polish ---------- */
+.grid .panel .stat { background: linear-gradient(90deg, #e8eefc, #22d3ee); -webkit-background-clip: text; background-clip: text; color: transparent; }
+header.top { backdrop-filter: blur(12px); border-bottom: 1px solid var(--glass-border); }
+.chip { letter-spacing: .02em; }
+table th { text-transform: uppercase; font-size: .72rem; letter-spacing: .05em; color: var(--muted); }
+
+/* ---------- AI co-pilot (bottom-right) ---------- */
+#aiFab {
+  position: fixed; right: 22px; bottom: 22px; z-index: 90;
+  width: 56px; height: 56px; border-radius: 50%;
+  border: 0; cursor: pointer;
+  background: linear-gradient(135deg, #22d3ee, #6366f1 55%, #3b82f6);
+  color: #04111f; font-weight: 800; font-size: 1.15rem;
+  box-shadow: 0 10px 28px rgba(34, 211, 238, .35), 0 0 0 1px rgba(255,255,255,.15) inset;
+  display: grid; place-items: center;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+#aiFab:hover { transform: scale(1.06); box-shadow: 0 14px 34px rgba(99,102,241,.45); }
+#aiFab[aria-expanded="true"] { transform: scale(.96); }
+#aiPanel {
+  position: fixed; right: 22px; bottom: 90px; z-index: 89;
+  width: min(380px, calc(100vw - 32px)); height: min(520px, calc(100vh - 120px));
+  display: none; flex-direction: column;
+  background: linear-gradient(160deg, rgba(16,26,56,.94), rgba(8,14,32,.96));
+  border: 1px solid var(--glass-border);
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.5), var(--glass-hi);
+  backdrop-filter: blur(20px) saturate(160%);
+  overflow: hidden;
+}
+#aiPanel.open { display: flex; }
+#aiHead {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--glass-border);
+  background: rgba(34,211,238,.06);
+}
+#aiHead strong { font-size: .95rem; }
+#aiHead .sub { font-size: .72rem; color: var(--muted); }
+#aiMsgs {
+  flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+}
+.ai-msg {
+  max-width: 92%; padding: 10px 12px; border-radius: 12px; font-size: .86rem; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ai-msg.bot { align-self: flex-start; background: rgba(255,255,255,.06); border: 1px solid var(--glass-border); }
+.ai-msg.me { align-self: flex-end; background: linear-gradient(135deg, rgba(34,211,238,.25), rgba(59,130,246,.22)); border: 1px solid var(--accent-border); }
+#aiForm { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--glass-border); }
+#aiInput {
+  flex: 1; min-height: 40px; border-radius: 10px; border: 1px solid var(--glass-border);
+  background: rgba(255,255,255,.06); color: var(--text); padding: 8px 10px; font: inherit;
+}
+#aiQuick { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 8px; }
+#aiQuick button {
+  font-size: .72rem; padding: 4px 8px; border-radius: 999px; cursor: pointer;
+  background: rgba(255,255,255,.05); border: 1px solid var(--glass-border); color: var(--text-dim);
+}
+#aiQuick button:hover { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -332,6 +391,22 @@ nav.side button { justify-content: flex-start; }
   <main><div class="row between"><h1 id="title">Overview</h1><div class="row"><span class="chip" id="who"></span><button class="btn sm ghost" id="logoutBtn" type="button">Sign out</button></div></div><div id="view"></div></main>
 </div>
 <dialog id="dlg"></dialog>
+<button type="button" id="aiFab" title="Admin AI co-pilot" aria-label="Open admin AI" aria-expanded="false">AI</button>
+<div id="aiPanel" role="dialog" aria-label="Admin AI co-pilot">
+  <div id="aiHead">
+    <div>
+      <strong>Admin AI</strong>
+      <div class="sub">Gemini · full panel guide &amp; threat checks</div>
+    </div>
+    <button type="button" class="btn sm ghost" id="aiClose" aria-label="Close">✕</button>
+  </div>
+  <div id="aiMsgs"></div>
+  <div id="aiQuick"></div>
+  <form id="aiForm">
+    <input id="aiInput" type="text" maxlength="4000" placeholder="Ask how any section works…" autocomplete="off">
+    <button class="btn primary sm" type="submit">Send</button>
+  </form>
+</div>
 <script nonce="{{NONCE}}">
 "use strict";
 (() => {
@@ -1082,6 +1157,57 @@ VIEWS.settings = async () => {
       show("settings");
     }) }, "Save settings") : null);
 };
+
+/* ---------- Admin AI co-pilot (Gemini) ---------- */
+const aiHist = [];
+const aiMsgs = $("#aiMsgs");
+const aiPanel = $("#aiPanel");
+const aiFab = $("#aiFab");
+const QUICK = [
+  "What does Overview show?",
+  "How do I bulk add cards?",
+  "How do payments / Plisio work?",
+  "Full security threat checklist",
+  "How to set GEMINI_API_KEY",
+  "How do invitations work?",
+];
+function aiPush(role, text) {
+  aiMsgs.append(h("div", { class: "ai-msg " + (role === "user" ? "me" : "bot") }, text));
+  aiMsgs.scrollTop = aiMsgs.scrollHeight;
+}
+function aiOpen(open) {
+  aiPanel.classList.toggle("open", open);
+  aiFab.setAttribute("aria-expanded", String(open));
+  if (open && !aiMsgs.childElementCount) {
+    aiPush("model", "Hi. I can explain every admin section, setup steps, and security checks for this marketplace. Pick a quick question or type your own.");
+  }
+}
+aiFab.addEventListener("click", () => aiOpen(!aiPanel.classList.contains("open")));
+$("#aiClose").addEventListener("click", () => aiOpen(false));
+const qbox = $("#aiQuick");
+QUICK.forEach((q) => qbox.append(h("button", { type: "button", onclick: () => { $("#aiInput").value = q; $("#aiForm").requestSubmit(); } }, q)));
+$("#aiForm").addEventListener("submit", go(async (ev) => {
+  ev.preventDefault();
+  const input = $("#aiInput");
+  const msg = (input.value || "").trim();
+  if (!msg) return;
+  input.value = "";
+  aiPush("user", msg);
+  aiHist.push({ role: "user", text: msg });
+  const thinking = h("div", { class: "ai-msg bot" }, "Thinking…");
+  aiMsgs.append(thinking);
+  aiMsgs.scrollTop = aiMsgs.scrollHeight;
+  try {
+    const r = await api("/admin/ai/chat", { method: "POST", body: { message: msg, history: aiHist.slice(-12) } });
+    thinking.remove();
+    const reply = (r && r.reply) || "No reply.";
+    aiPush("model", reply);
+    aiHist.push({ role: "model", text: reply });
+  } catch (e) {
+    thinking.remove();
+    aiPush("model", e.message || "Request failed.");
+  }
+}));
 
 /* resume session after reload */
 st.base = (SS.get("base") || "").replace(/\/$/, "");

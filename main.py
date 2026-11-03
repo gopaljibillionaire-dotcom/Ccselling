@@ -1826,7 +1826,7 @@ async def home(country: str = "") -> dict:
 
     # storefront stats (best-effort; never fail the page)
     try:
-        # Active users: any active account that is not staff (covers missing/legacy role field)
+        # Active users: prefer explicit active customers; fall back broadly so real counts show
         active_users = await db()["users"].count_documents({
             "status": "active",
             "$or": [
@@ -1837,23 +1837,33 @@ async def home(country: str = "") -> dict:
             ],
         })
         if active_users == 0:
-            # fallback: every active non-staff document
             active_users = await db()["users"].count_documents({
-                "status": "active",
                 "role": {"$nin": list(STAFF_ROLES)},
             })
+        if active_users == 0:
+            active_users = await db()["users"].count_documents({})
         total_buyers = await db()["users"].count_documents({
-            "status": "active",
             "lifetime_spend_minor": {"$gt": 0},
         })
-        # Cards on the shelf: prefer published; if none, show non-archived so admin sees inventory
-        published_cards = await db()["products"].count_documents({"status": "published"})
-        if published_cards > 0:
-            available_cards = published_cards
-        else:
-            available_cards = await db()["products"].count_documents({"status": {"$ne": "archived"}})
-            if available_cards == 0:
-                available_cards = await db()["products"].count_documents({})
+        if total_buyers == 0:
+            total_buyers = await db()["orders"].distinct("user_id", {"status": "paid"})
+            total_buyers = len(total_buyers) if isinstance(total_buyers, list) else 0
+        # Available cards = units still sellable (sum of variants.available on published products)
+        avail_pipe = [
+            {"$match": {"status": "published"}},
+            {"$project": {"avail": {"$sum": {"$map": {"input": {"$ifNull": ["$variants", []]}, "as": "v", "in": {"$ifNull": ["$$v.available", 0]}}}}}},
+            {"$group": {"_id": None, "units": {"$sum": "$avail"}, "products": {"$sum": 1}}},
+        ]
+        avail_agg = await db()["products"].aggregate(avail_pipe).to_list(1)
+        available_cards = int(avail_agg[0]["units"]) if avail_agg else 0
+        if available_cards == 0:
+            published_cards = await db()["products"].count_documents({"status": "published"})
+            if published_cards > 0:
+                available_cards = published_cards
+            else:
+                available_cards = await db()["products"].count_documents({"status": {"$ne": "archived"}})
+                if available_cards == 0:
+                    available_cards = await db()["products"].count_documents({})
         # Countries: enabled catalog entries, else distinct product countries
         enabled = [c for c in (ctx.get("countries") or {}).values() if c.get("enabled", True)]
         available_countries = len(enabled)
@@ -1875,11 +1885,15 @@ async def home(country: str = "") -> dict:
         avg_review = None
         if agg and agg[0].get("cnt"):
             avg_review = round(float(agg[0]["sum"]) / float(agg[0]["cnt"]), 2)
-        # Match admin overview: total customers + completed orders (attractive social proof)
         customers_total = await db()["users"].count_documents({"role": "customer"})
         if customers_total == 0:
             customers_total = active_users
-        orders_completed = await db()["orders"].count_documents({"status": "paid"})
+        # Completed orders: paid + any legacy success statuses
+        orders_completed = await db()["orders"].count_documents({
+            "status": {"$in": ["paid", "completed", "fulfilled", "delivered"]},
+        })
+        if orders_completed == 0:
+            orders_completed = await db()["orders"].count_documents({"status": "paid"})
         orders_total = await db()["orders"].count_documents({})
         out["stats"] = {
             "active_users": int(active_users),
@@ -2245,12 +2259,87 @@ async def admin_stats(user: dict = Depends(staff)) -> dict:
     out_q = {"status": "published", "$expr": {"$lte": [{"$sum": "$variants.available"}, 0]}}
     rev = await (await db()["orders"].aggregate([{"$match": {"status": {"$in": ["paid", "refunded"]}}}, {"$group": {"_id": None, "rev": {"$sum": "$total_minor"}, "ref": {"$sum": "$refund_total_minor"}}}])).to_list(1)
     since = utcnow() - timedelta(days=30)
-    return {"currency": settings.default_currency, "customers_total": await c("users", {"role": "customer"}),
+    customers_total = await c("users", {"role": "customer"})
+    if customers_total == 0:
+        customers_total = await c("users", {"role": {"$nin": list(STAFF_ROLES)}})
+    orders_completed = await c("orders", {"status": {"$in": ["paid", "completed", "fulfilled", "delivered"]}})
+    if orders_completed == 0:
+        orders_completed = await c("orders", {"status": "paid"})
+    return {"currency": settings.default_currency, "customers_total": customers_total,
             "customers_active": await c("sessions", {"kind": "full", "last_seen": {"$gt": since}}), "products_published": await c("products", {"status": "published"}),
             "low_stock": await c("products", low_q), "out_of_stock": await c("products", out_q), "orders_total": await c("orders", {}),
-            "orders_pending": await c("orders", {"status": {"$in": ["created", "pending"]}}), "orders_completed": await c("orders", {"status": "paid"}),
+            "orders_pending": await c("orders", {"status": {"$in": ["created", "pending"]}}), "orders_completed": orders_completed,
             "payments_pending": await c("payment_records", {"status": "pending"}), "revenue_minor": (rev[0]["rev"] - rev[0]["ref"]) if rev else 0,
             "refunds_minor": rev[0]["ref"] if rev else 0}
+
+
+class AdminAiChatIn(Strict):
+    message: str = Field(min_length=1, max_length=4000)
+    history: List[dict] = Field(default_factory=list, max_length=20)
+
+
+@admin.post("/ai/chat")
+async def admin_ai_chat(body: AdminAiChatIn, user: dict = Depends(staff)) -> dict:
+    """Staff-only Gemini assistant for the admin panel: how sections work, setup steps, threat checks."""
+    key = settings.gemini_api_key
+    if not key:
+        return {
+            "reply": (
+                "GEMINI_API_KEY is not set. Add it to your environment (.env) and restart the API. "
+                "Model default is gemini-2.0-flash. Once set, this assistant can explain every admin section, "
+                "setup steps, and security checks for this marketplace."
+            ),
+            "ok": False,
+        }
+    system = (
+        "You are the built-in admin co-pilot for CCS / Auralis marketplace admin panel. "
+        "Answer only about this admin UI and backend: Overview stats, Products (cards), Product fields, "
+        "Categories, Countries, Inventory, Orders, Payments (Plisio), Customers, Invitations, Membership tiers, "
+        "Support tickets, Push notify, Reviews, Security dashboard, Settings. "
+        "Explain what each section does, how to configure it, common mistakes, and security threats/checks "
+        "(session MFA, rate limits, payment verification never manual, inventory atomic decrements, invite-only, "
+        "CSRF, cookie flags, webhook authenticity). Be concrete and step-by-step. "
+        "Do not invent features that are not listed. Keep answers under 400 words unless asked for a full guide. "
+        "If asked for threats, cover: weak APP_SECRET, missing MFA, open CORS, unsecured webhooks, stock races, "
+        "admin session idle, leaked Plisio keys, bulk import abuse."
+    )
+    hist = []
+    for h in body.history[-12:]:
+        role = h.get("role") if isinstance(h, dict) else None
+        text = h.get("text") if isinstance(h, dict) else None
+        if role in ("user", "model") and isinstance(text, str) and text.strip():
+            hist.append({"role": role, "parts": [{"text": text.strip()[:2000]}]})
+    hist.append({"role": "user", "parts": [{"text": body.message.strip()[:4000]}]})
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{settings.gemini_model}:generateContent?key={key}"
+    )
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": hist,
+        "generationConfig": {"temperature": 0.35, "maxOutputTokens": 2048},
+    }
+    try:
+        if not S.http:
+            raise RuntimeError("http client unavailable")
+        r = await S.http.post(url, json=payload, timeout=45)
+        j = r.json()
+        if r.status_code >= 400:
+            err = j.get("error", {}).get("message") or r.text[:200]
+            return {"reply": f"Gemini error ({r.status_code}): {err}", "ok": False}
+        text = (
+            j.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+            or ""
+        ).strip()
+        if not text:
+            return {"reply": "Empty response from Gemini. Try again.", "ok": False}
+        return {"reply": text, "ok": True}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("admin ai chat failed: %s", type(exc).__name__)
+        return {"reply": f"Could not reach Gemini: {type(exc).__name__}. Check network and GEMINI_API_KEY.", "ok": False}
 
 
 # ---- products --------------------------------------------------------------------
