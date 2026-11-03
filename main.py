@@ -146,7 +146,15 @@ DEFAULT_COUNTRIES = {"US": "United States", "GB": "United Kingdom", "CA": "Canad
 DEFAULT_SITE = {"_id": "site", "brand_name": settings.brand_name, "tagline": "Premium goods from around the world",
                 "hero_title": "Discover the world, delivered.", "hero_subtitle": "Curated products by country, with member rewards.",
                 "support_url": "", "support_email": "", "invite_only": settings.invite_only, "tax_rate_bps": 0,
-                "points_per_unit": 1, "terms_url": ""}
+                "points_per_unit": 1, "terms_url": "",
+                # Optional storefront display overrides (admin-controlled social proof numbers)
+                "display_stats_enabled": False,
+                "display_active_users": None,
+                "display_orders_completed": None,
+                "display_available_cards": None,
+                "display_total_buyers": None,
+                "display_available_countries": None,
+                "display_avg_review": None}
 
 
 async def seed_defaults(d: Any) -> None:
@@ -628,6 +636,14 @@ class SiteIn(Strict):
     mastercard_logo_url: Optional[str] = Field(default=None, max_length=500)
     visa_logo_url: Optional[str] = Field(default=None, max_length=500)
     brands: Optional[List[BrandLogoIn]] = None
+    # Storefront display numbers (optional overrides)
+    display_stats_enabled: Optional[bool] = None
+    display_active_users: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    display_orders_completed: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    display_available_cards: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    display_total_buyers: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    display_available_countries: Optional[int] = Field(default=None, ge=0, le=300)
+    display_avg_review: Optional[float] = Field(default=None, ge=0, le=5)
 
 
 class RefundIn(Strict):
@@ -1895,7 +1911,7 @@ async def home(country: str = "") -> dict:
         if orders_completed == 0:
             orders_completed = await db()["orders"].count_documents({"status": "paid"})
         orders_total = await db()["orders"].count_documents({})
-        out["stats"] = {
+        stats = {
             "active_users": int(active_users),
             "customers_total": int(customers_total),
             "total_buyers": int(total_buyers),
@@ -1905,6 +1921,26 @@ async def home(country: str = "") -> dict:
             "available_cards": int(available_cards),
             "available_countries": int(available_countries),
         }
+        # Admin-controlled display overrides (storefront social proof)
+        try:
+            site = await get_site()
+            if site.get("display_stats_enabled"):
+                if site.get("display_active_users") is not None:
+                    stats["active_users"] = int(site["display_active_users"])
+                    stats["customers_total"] = int(site["display_active_users"])
+                if site.get("display_orders_completed") is not None:
+                    stats["orders_completed"] = int(site["display_orders_completed"])
+                if site.get("display_available_cards") is not None:
+                    stats["available_cards"] = int(site["display_available_cards"])
+                if site.get("display_total_buyers") is not None:
+                    stats["total_buyers"] = int(site["display_total_buyers"])
+                if site.get("display_available_countries") is not None:
+                    stats["available_countries"] = int(site["display_available_countries"])
+                if site.get("display_avg_review") is not None:
+                    stats["avg_review"] = float(site["display_avg_review"])
+        except Exception:
+            pass
+        out["stats"] = stats
     except Exception as exc:  # pragma: no cover
         log.warning("home stats failed: %s", type(exc).__name__)
         out["stats"] = {
@@ -3246,17 +3282,23 @@ async def admin_settings_get(user: dict = Depends(staff)) -> dict:
 
 @admin.put("/settings")
 async def admin_settings_save(body: SiteIn, request: Request, user: dict = Depends(admin_user)) -> dict:
-    upd = {k: v for k, v in body.model_dump().items() if v is not None}
+    raw = body.model_dump()
+    # Keep explicit nulls only for optional display overrides we want to clear; otherwise drop None
+    display_keys = {
+        "display_stats_enabled", "display_active_users", "display_orders_completed",
+        "display_available_cards", "display_total_buyers", "display_available_countries", "display_avg_review",
+    }
+    upd = {k: v for k, v in raw.items() if v is not None or k in display_keys}
     for k in ("support_url", "terms_url"):
         if upd.get(k):
             upd[k] = sec.validate_https_url(upd[k], k)
     if upd.get("support_email"):
         upd["support_email"] = sec.clean_email(upd["support_email"])
     for k in ("brand_name", "tagline", "hero_title", "hero_subtitle"):
-        if k in upd:
+        if k in upd and upd[k] is not None:
             upd[k] = sec.clean_text(upd[k], 200)
     if "plisio_api_key" in upd:
-        key = sec.clean_text(upd["plisio_api_key"], 200)
+        key = sec.clean_text(upd["plisio_api_key"] or "", 200)
         if key in ("", "********", "unchanged"):
             upd.pop("plisio_api_key", None)
         else:
@@ -3267,6 +3309,19 @@ async def admin_settings_save(body: SiteIn, request: Request, user: dict = Depen
                 upd[k] = sec.validate_image_url(upd[k], k)
             except Exception:
                 upd[k] = sec.validate_https_url(upd[k], k)
+    # Clamp display numbers
+    for k in ("display_active_users", "display_orders_completed", "display_available_cards",
+              "display_total_buyers", "display_available_countries"):
+        if k in upd and upd[k] is not None:
+            try:
+                upd[k] = max(0, min(int(upd[k]), 10_000_000))
+            except (TypeError, ValueError):
+                upd.pop(k, None)
+    if "display_avg_review" in upd and upd["display_avg_review"] is not None:
+        try:
+            upd["display_avg_review"] = max(0.0, min(float(upd["display_avg_review"]), 5.0))
+        except (TypeError, ValueError):
+            upd.pop("display_avg_review", None)
     if "brands" in upd and upd["brands"] is not None:
         cleaned = []
         for b in upd["brands"] or []:
@@ -3566,9 +3621,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=f"{settings.brand_name} Marketplace API", version="1.0.0", lifespan=lifespan,
               docs_url=None if settings.is_production else "/docs", redoc_url=None, openapi_url=None if settings.is_production else "/openapi.json")
 app.add_middleware(sec.SecurityHeadersMiddleware)
-_cors_origins = settings.effective_origins() or ["*"]
-app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-                   allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "Idempotency-Key", "X-Requested-With"], max_age=600)
+_cors_origins = settings.effective_origins()
+# Empty ALLOWED_ORIGINS → reflect any origin in non-production so file:// / local admin works
+if not _cors_origins:
+    _cors_origins = ["*"] if not settings.is_production else []
+if settings.admin_allow_file_origin and "null" not in _cors_origins and _cors_origins != ["*"]:
+    _cors_origins = list(_cors_origins) + ["null"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials=(_cors_origins != ["*"]),
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "Idempotency-Key", "X-Requested-With"],
+    max_age=600,
+)
 
 
 @app.middleware("http")

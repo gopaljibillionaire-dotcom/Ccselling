@@ -421,11 +421,34 @@ function toast(m, k = "") { const t = h("div", { class: "toast " + k, role: "sta
 const chip = (s) => h("span", { class: "chip " + (["paid", "published", "active", "ok", "matched", "approved", "delivered"].includes(s) ? "ok" : ["pending", "created", "draft", "open", "unfulfilled", "processing"].includes(s) ? "warn" : ["failed", "expired", "cancelled", "refunded", "suspended", "archived", "mismatch", "rejected"].includes(s) ? "bad" : "") }, s);
 
 async function api(path, { method = "GET", body, raw } = {}) {
-  const hd = { Accept: "application/json" }; if (st.token) hd.Authorization = "Bearer " + st.token; if (body !== undefined) hd["Content-Type"] = "application/json";
-  let r; try { r = await fetch(st.base + "/api" + path, { method, headers: hd, body: body !== undefined ? JSON.stringify(body) : undefined }); } catch { throw new Error("Cannot reach the server. Check the Server URL, HTTPS and the ALLOWED_ORIGINS setting."); }
+  // Keep base in sync with the login field (file:// admin or changed URL)
+  try {
+    const el = $("#apiBase");
+    if (el) {
+      const b = (el.value || "").trim().replace(/\/+$/, "");
+      if (b !== st.base) { st.base = b; SS.set("base", b); }
+    }
+  } catch {}
+  const hd = { Accept: "application/json" };
+  if (st.token) hd.Authorization = "Bearer " + st.token;
+  if (body !== undefined) hd["Content-Type"] = "application/json";
+  if (st.csrf) hd["X-CSRF-Token"] = st.csrf;
+  const url = (st.base || "") + "/api" + path;
+  let r;
+  try {
+    r = await fetch(url, { method, headers: hd, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: st.base ? "omit" : "same-origin" });
+  } catch (err) {
+    const hint = st.base
+      ? `Cannot reach ${st.base}. Check Server URL, HTTPS, CORS (ALLOWED_ORIGINS must include this page origin), and that the API is up.`
+      : "Cannot reach the API on this host. If you opened admin.html as a file, set Server URL to your API (https://…).";
+    throw new Error(hint);
+  }
   if (raw && r.ok) return r;
   let d = null; try { d = await r.json(); } catch {}
-  if (!r.ok) { if (r.status === 401 && st.user) { signedOut("Session expired. Please sign in again."); } throw new Error((d && d.error) || "Request failed (" + r.status + ")"); }
+  if (!r.ok) {
+    if (r.status === 401 && st.user) signedOut("Session expired. Please sign in again.");
+    throw new Error((d && (d.error || d.detail)) || "Request failed (" + r.status + ")");
+  }
   return d;
 }
 const go = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, "bad"); } };
@@ -1115,6 +1138,22 @@ VIEWS.settings = async () => {
   const mcLogo = h("input", { type: "url", value: r.mastercard_logo_url || "", placeholder: "https://i.ibb.co/.../mastercard.png" });
   const visaLogo = h("input", { type: "url", value: r.visa_logo_url || "", placeholder: "https://i.ibb.co/.../visa.png" });
 
+  // Storefront display numbers (optional overrides)
+  const dispOn = h("input", { type: "checkbox", checked: !!r.display_stats_enabled });
+  const disp = {};
+  const dispFields = [
+    ["display_active_users", "Active users"],
+    ["display_orders_completed", "Orders completed"],
+    ["display_available_cards", "Available cards"],
+    ["display_total_buyers", "Total buyers"],
+    ["display_available_countries", "Countries"],
+    ["display_avg_review", "Avg. review (0–5)"],
+  ];
+  dispFields.forEach(([k]) => {
+    const v = r[k];
+    disp[k] = h("input", { type: "number", min: "0", step: k === "display_avg_review" ? "0.1" : "1", value: v != null && v !== "" ? String(v) : "" });
+  });
+
   // Card network brands (name + ImgBB logo). Used on shop rows when a product brand matches.
   let brandRows = Array.isArray(r.brands) ? r.brands.map((b) => ({ name: b.name || "", logo_url: b.logo_url || "" })) : [];
   if (!brandRows.length) {
@@ -1138,14 +1177,25 @@ VIEWS.settings = async () => {
 
   return h("div", null,
     h("div", { class: "panel" }, h("h3", null, "Storefront"), keys.map(([k, l]) => { ins[k] = h("input", { value: r[k] ?? "" }); return field(l, ins[k]); }), h("label", { class: "row" }, inv, "Invitation-only registration")),
+    h("div", { class: "panel" },
+      h("h3", null, "Storefront display numbers"),
+      h("p", { class: "muted small" }, "When enabled, these numbers replace live DB counts on the public home page (Active users, Orders completed, Available cards, etc.). Leave a field empty to keep the live value for that metric."),
+      h("label", { class: "row" }, dispOn, "Enable custom display numbers"),
+      h("div", { class: "grid" }, dispFields.map(([k, l]) => field(l, disp[k])))
+    ),
     h("div", { class: "panel" }, h("h3", null, "Plisio payments"), h("p", { class: "muted small" }, "Change the API key any time — the wallet/merchant on Plisio switches immediately for new invoices."), field("Plisio API key", plisioKey), h("label", { class: "row" }, plisioSand, "Sandbox mode"), field("Mastercard logo URL (legacy)", mcLogo), field("Visa logo URL (legacy)", visaLogo)),
     h("div", { class: "panel" }, h("h3", null, "Card brands"), h("p", { class: "muted small" }, "Add network brands with their logo. When a product brand/subcategory matches a name (Visa, Mastercard, Amex…), the logo shows on the shop table."), brandBox),
     isAdmin() ? h("button", { class: "btn primary", type: "button", onclick: go(async () => {
-      const body = { invite_only: inv.checked, plisio_sandbox: plisioSand.checked };
+      const body = { invite_only: inv.checked, plisio_sandbox: plisioSand.checked, display_stats_enabled: dispOn.checked };
       for (const [k] of keys) {
         const v = ins[k].value.trim();
         if (["tax_rate_bps", "points_per_unit"].includes(k)) { if (v !== "") body[k] = Number(v); }
         else if (v !== "") body[k] = v;
+      }
+      for (const [k] of dispFields) {
+        const v = (disp[k].value || "").trim();
+        if (v === "") body[k] = null;
+        else body[k] = k === "display_avg_review" ? Number(v) : parseInt(v, 10);
       }
       const pk = plisioKey.value.trim();
       if (pk && pk !== "********") body.plisio_api_key = pk;
