@@ -505,15 +505,18 @@ body { padding-bottom: 72px; }
   }
   .products.tableish .card-main {
     display: grid;
-    grid-template-columns: 120px 120px 100px 90px 100px 100px;
-    grid-template-areas: "country bin brand type price actions";
-    gap: 10px;
+    grid-template-columns: 100px 90px 90px 70px 120px 90px 100px 80px 110px;
+    grid-template-areas: "country bin brand type meta bank base price actions";
+    gap: 8px;
     padding: 10px 14px;
   }
+  .products.tableish .td-meta { grid-area: meta; }
+  .products.tableish .td-bank { grid-area: bank; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .products.tableish .td-base { grid-area: base; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .shop-table-head {
     display: grid;
-    grid-template-columns: 120px 120px 100px 90px 100px 100px;
-    gap: 10px;
+    grid-template-columns: 100px 90px 90px 70px 120px 90px 100px 80px 110px;
+    gap: 8px;
     padding: 8px 14px;
     margin-bottom: 6px;
     color: var(--muted);

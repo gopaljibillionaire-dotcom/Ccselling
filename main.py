@@ -291,6 +291,30 @@ async def runtime_plisio_sandbox() -> bool:
     return settings.plisio_sandbox
 
 
+async def runtime_oxapay_key() -> str:
+    site = await get_site()
+    key = (site or {}).get("oxapay_api_key") or settings.oxapay_api_key
+    return (key or "").strip()
+
+
+async def runtime_oxapay_sandbox() -> bool:
+    site = await get_site()
+    if site and "oxapay_sandbox" in site and site["oxapay_sandbox"] is not None:
+        return bool(site["oxapay_sandbox"])
+    return settings.oxapay_sandbox
+
+
+async def runtime_deposit_min_minor() -> int:
+    site = await get_site()
+    v = (site or {}).get("wallet_deposit_min_minor")
+    if v is None:
+        return int(settings.wallet_deposit_min_minor)
+    try:
+        return max(100, min(int(v), 10_000_000))
+    except (TypeError, ValueError):
+        return int(settings.wallet_deposit_min_minor)
+
+
 async def get_tiers() -> List[dict]:
     async def load():
         return [t async for t in db()["memberships"].find({"kind": "tier", "active": True}).sort("threshold_minor", 1)]
@@ -328,7 +352,7 @@ async def get_session(request: Request) -> Optional[dict]:
     return sess
 
 
-EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook"}
+EXEMPT_LIMIT = {"/api/health", "/api/payments/plisio/webhook", "/api/payments/oxapay/webhook"}
 
 
 async def api_rate_limit(request: Request) -> None:
@@ -426,7 +450,7 @@ class CartItemIn(Strict):
 
 
 class CheckoutIn(Strict):
-    payment_method: Literal["plisio", "wallet"] = "plisio"
+    payment_method: Literal["oxapay", "plisio", "wallet"] = "oxapay"
     # "Buy now": purchase just this one item, leaving the saved cart untouched.
     buy_now: Optional[CartItemIn] = None
 
@@ -633,6 +657,9 @@ class SiteIn(Strict):
     points_per_unit: Optional[int] = Field(default=None, ge=0, le=100)
     plisio_api_key: Optional[str] = Field(default=None, max_length=200)
     plisio_sandbox: Optional[bool] = None
+    oxapay_api_key: Optional[str] = Field(default=None, max_length=200)
+    oxapay_sandbox: Optional[bool] = None
+    wallet_deposit_min_minor: Optional[int] = Field(default=None, ge=100, le=10_000_000)
     mastercard_logo_url: Optional[str] = Field(default=None, max_length=500)
     visa_logo_url: Optional[str] = Field(default=None, max_length=500)
     brands: Optional[List[BrandLogoIn]] = None
@@ -810,6 +837,7 @@ async def public_product(p: dict, detail: bool = False, ctx: Optional[dict] = No
     }
     sf = await schema_fields_for(p.get("category_id"))
     pub_fields = []
+    seen_keys = set()
     for key, fd in sorted(sf.items(), key=lambda kv: kv[1].get("position", 0)):
         val = p.get("fields", {}).get(key)
         if fd.get("public") and val is not None and (detail or fd.get("show_on_card")):
@@ -817,7 +845,31 @@ async def public_product(p: dict, detail: bool = False, ctx: Optional[dict] = No
             if isinstance(raw, str):
                 raw = mask_cc_value(fd.get("label", key), raw)
             pub_fields.append({"key": key, "label": fd["label"], "type": fd["type"], "value": raw, "card": fd.get("show_on_card", False)})
+            seen_keys.add(key)
+    # Fallback: expose common card keys stored on the product even if schema flags are missing
+    pfields = p.get("fields") or {}
+    fallback_order = [
+        ("bin", "BIN"), ("cc", "BIN"), ("card_number", "BIN"), ("pan", "BIN"),
+        ("expiry", "Expiry"), ("exp", "Expiry"),
+        ("brand", "Brand"), ("scheme", "Brand"), ("network", "Brand"),
+        ("type", "Type"), ("card_type", "Type"),
+        ("bank", "Bank"),
+        ("state", "State"), ("zip", "ZIP"), ("zipcode", "ZIP"), ("city", "City"),
+        ("base", "Base"), ("base_name", "Base"),
+    ]
+    for key, label in fallback_order:
+        if key in seen_keys:
+            continue
+        val = pfields.get(key)
+        if val is None or val == "":
+            continue
+        raw = jsonable(val)
+        if isinstance(raw, str) and any(x in key for x in ("bin", "cc", "card", "pan")):
+            raw = mask_cc_value(label, raw)
+        pub_fields.append({"key": key, "label": label, "type": "text", "value": raw, "card": True})
+        seen_keys.add(key)
     out["fields"] = pub_fields
+    out["base"] = pfields.get("base") or pfields.get("base_name") or p.get("subcategory") or ""
     out["variants"] = [{"sku": v["sku"], "label": v["label"], "in_stock": v.get("available", 0) > 0,
                         "final_price_minor": apply_discount(v.get("price_minor") or p["price_minor"], pct)} for v in p.get("variants", [])]
     if detail:
@@ -1133,9 +1185,72 @@ async def plisio_request(path: str, params: Optional[dict] = None) -> dict:
 
 async def create_invoice(user: dict, reference: str, amount_minor: int, purpose: str, order_id: Optional[ObjectId], description: str) -> dict:
     await S.limiter.enforce("pay", str(user["_id"]), settings.rl_payment_max, settings.rl_payment_window)
-
     amount = float(Decimal(amount_minor) / 100)
+    oxa_key = await runtime_oxapay_key()
+    if oxa_key:
+        # OxaPay Generate Invoice (legacy merchants/request + newer payment path)
+        payload = {
+            "merchant": oxa_key,
+            "amount": amount,
+            "currency": settings.default_currency,
+            "lifeTime": 60,
+            "callbackUrl": f"{settings.public_app_url}/api/payments/oxapay/webhook",
+            "returnUrl": f"{settings.public_app_url}/?order={reference}",
+            "orderId": reference,
+            "description": (description or reference)[:200],
+            "email": user.get("email") or "",
+        }
+        if await runtime_oxapay_sandbox():
+            payload["sandbox"] = True
+        url = f"{settings.oxapay_base_url}/merchants/request"
+        try:
+            assert S.http is not None
+            r = await S.http.post(url, json=payload, timeout=settings.outbound_timeout_seconds)
+            data = r.json() if r.content else {}
+        except Exception as exc:
+            log.error("OxaPay invoice request failed: %s", type(exc).__name__)
+            raise HTTPException(502, "Payment provider is temporarily unavailable.") from exc
+        # Accept both legacy {result, trackId, payLink} and nested data shapes
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            body = data["data"]
+        else:
+            body = data if isinstance(data, dict) else {}
+        track_id = str(body.get("trackId") or body.get("track_id") or data.get("trackId") or "")
+        invoice_url = body.get("payLink") or body.get("payment_url") or body.get("pay_link") or data.get("payLink") or ""
+        if not track_id or not invoice_url:
+            log.error("OxaPay response missing track/payLink: %s", json.dumps(data)[:500])
+            raise HTTPException(502, "Payment provider returned an unexpected response.")
+        parsed = urlparse(invoice_url)
+        host = (parsed.hostname or "").lower()
+        allowed = ("oxapay.com", "pay.oxapay.com")
+        if parsed.scheme != "https" or not any(host == h or host.endswith("." + h) for h in allowed):
+            log.error("OxaPay invalid invoice URL: %s", invoice_url)
+            raise HTTPException(502, "Payment provider returned an unexpected response (invalid URL).")
+        pay = {
+            "provider": "oxapay",
+            "purpose": purpose,
+            "reference": reference,
+            "order_id": order_id,
+            "user_id": user["_id"],
+            "track_id": track_id,
+            "payment_url": invoice_url,
+            "expected_minor": amount_minor,
+            "currency": settings.default_currency,
+            "status": "pending",
+            "verified_minor": None,
+            "verification": None,
+            "sandbox": await runtime_oxapay_sandbox(),
+            "created_at": utcnow(),
+            "updated_at": utcnow(),
+            "history": [{"status": "pending", "at": utcnow(), "note": "invoice created via oxapay"}],
+        }
+        await db()["payment_records"].insert_one(pay)
+        return pay
 
+    # Fallback: Plisio (legacy)
+    api_key = await runtime_plisio_key()
+    if not api_key:
+        raise HTTPException(503, "Payments are not configured. Set OXAPAY_API_KEY (preferred) or PLISIO_API_KEY.")
     data = await plisio_request("/invoices/new", {
         "source_currency": settings.default_currency,
         "source_amount": str(amount),
@@ -1147,26 +1262,15 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
         "fail_invoice_url": f"{settings.public_app_url}/?order={reference}&status=failed",
         "expire_min": "60",
     })
-
     txn_id = data.get("txn_id") or data.get("id")
     invoice_url = data.get("invoice_url") or data.get("url", "")
-
-    if not txn_id:
-        log.error("Plisio response missing txn_id: %s", json.dumps(data)[:500])
-        raise HTTPException(502, "Payment provider returned an unexpected response (missing transaction ID).")
-
-    if not invoice_url:
-        log.error("Plisio response missing invoice_url: %s", json.dumps(data)[:500])
-        raise HTTPException(502, "Payment provider returned an unexpected response (missing payment URL).")
-
-    # Validate the invoice URL host and scheme before trusting it
+    if not txn_id or not invoice_url:
+        raise HTTPException(502, "Payment provider returned an unexpected response.")
     parsed = urlparse(invoice_url)
     host = (parsed.hostname or "").lower()
     allowed_hosts = ("plisio.net", "plisio.com", "payplisio.net")
     if parsed.scheme != "https" or not any(host == h or host.endswith("." + h) for h in allowed_hosts):
-        log.error("Plisio returned invalid invoice URL: %s", invoice_url)
         raise HTTPException(502, "Payment provider returned an unexpected response (invalid URL).")
-
     pay = {
         "provider": "plisio",
         "purpose": purpose,
@@ -1183,7 +1287,7 @@ async def create_invoice(user: dict, reference: str, amount_minor: int, purpose:
         "sandbox": await runtime_plisio_sandbox(),
         "created_at": utcnow(),
         "updated_at": utcnow(),
-        "history": [{"status": "pending", "at": utcnow(), "note": "invoice created", "actor": None}],
+        "history": [{"status": "pending", "at": utcnow(), "note": "invoice created via plisio"}],
     }
     await db()["payment_records"].insert_one(pay)
     return pay
@@ -1517,7 +1621,7 @@ async def public_config() -> dict:
         brands.append({"name": "Mastercard", "logo_url": site.get("mastercard_logo_url")})
     return {"brand_name": site.get("brand_name"), "tagline": site.get("tagline"), "hero_title": site.get("hero_title"), "hero_subtitle": site.get("hero_subtitle"),
             "support_url": site.get("support_url"), "support_email": site.get("support_email"), "terms_url": site.get("terms_url"),
-            "invite_only": site.get("invite_only", False), "currency": settings.default_currency, "payments_enabled": bool((site or {}).get("plisio_api_key") or settings.plisio_api_key),
+            "invite_only": site.get("invite_only", False), "currency": settings.default_currency, "payments_enabled": bool((site or {}).get("oxapay_api_key") or settings.oxapay_api_key or (site or {}).get("plisio_api_key") or settings.plisio_api_key), "wallet_deposit_min_minor": (site or {}).get("wallet_deposit_min_minor") or settings.wallet_deposit_min_minor,
             "mastercard_logo_url": (site or {}).get("mastercard_logo_url") or "",
             "visa_logo_url": (site or {}).get("visa_logo_url") or "",
             "brands": brands,
@@ -1765,6 +1869,7 @@ async def public_filters(category_id: Optional[str] = None) -> dict:
 
 @api.get("/products")
 async def list_products(request: Request, q: str = "", country: str = "", category: str = "", subcategory: str = "",
+                        base: str = "",
                         min_price: Optional[str] = None, max_price: Optional[str] = None, availability: str = "",
                         sort: str = "relevance", page: int = Query(1, ge=1, le=200), limit: int = Query(12, ge=1, le=48)) -> dict:
     flt: Dict[str, Any] = {"status": "published"}
@@ -1779,6 +1884,14 @@ async def list_products(request: Request, q: str = "", country: str = "", catego
         flt["category_id"] = {"$in": [cat_oid] + child_ids}
     if subcategory:
         flt["subcategory"] = sec.clean_text(subcategory, 60)
+    if base:
+        b = sec.clean_text(base, 60)
+        # Match base field, base_name field, or subcategory used as batch label
+        flt["$or"] = [
+            {"fields.base": b},
+            {"fields.base_name": b},
+            {"subcategory": b},
+        ]
     price: Dict[str, int] = {}
     if min_price:
         price["$gte"] = money_to_minor(min_price, "min_price")
@@ -2057,7 +2170,7 @@ async def checkout(body: CheckoutIn, request: Request, idempotency_key: str = He
         cart = await db()["carts"].find_one({"user_id": user["_id"]}) or {"items": []}
     if not cart["items"]:
         raise HTTPException(422, "Your cart is empty")
-    if body.payment_method == "plisio" and not settings.plisio_enabled:
+    if body.payment_method in ("plisio", "oxapay") and not (settings.oxapay_enabled or settings.plisio_enabled):
         raise HTTPException(503, "Crypto payments are not configured on this server")
     priced = await price_cart(user, cart["items"], strict=True)
     if priced["total_minor"] <= 0:
@@ -2142,6 +2255,65 @@ async def cancel_order(number: str, request: Request, user: dict = Depends(curre
 
 
 # ---- payments -----------------------------------------------------------------
+
+@api.post("/payments/oxapay/webhook")
+async def oxapay_webhook(request: Request) -> Response:
+    """OxaPay IPN: HMAC-SHA512(raw body, MERCHANT_API_KEY) in HMAC header."""
+    raw = await request.body()
+    key = await runtime_oxapay_key()
+    sig = request.headers.get("HMAC") or request.headers.get("hmac")
+    if not key or not sec.verify_hmac_sha512(raw, sig, key):
+        await audit(request, "webhook.oxapay_bad_sig", category="security", level="warn")
+        return Response("invalid", status_code=400)
+    try:
+        payload = json.loads(raw.decode("utf-8") or "{}")
+    except Exception:
+        await audit(request, "webhook.malformed", category="security", level="warn")
+        return Response("bad json", status_code=400)
+    track = str(payload.get("trackId") or payload.get("track_id") or payload.get("track_id") or "")
+    status_raw = str(payload.get("status") or payload.get("status") or "").lower()
+    order_id = str(payload.get("orderId") or payload.get("order_id") or "")
+    if not track:
+        return Response("ok", status_code=200)
+    key_ev = f"oxapay:{track}:{status_raw}"
+    try:
+        await db()["webhook_events"].insert_one({
+            "event_key": key_ev, "provider": "oxapay", "track_id": track,
+            "status": status_raw, "received_at": utcnow(), "attempts": 1, "processed": False,
+        })
+    except DuplicateKeyError:
+        await db()["webhook_events"].find_one_and_update({"event_key": key_ev}, {"$inc": {"attempts": 1}})
+    pay = await db()["payment_records"].find_one({"track_id": track, "provider": "oxapay"})
+    if not pay and order_id:
+        pay = await db()["payment_records"].find_one({"reference": order_id})
+    if not pay:
+        await db()["webhook_events"].update_one({"event_key": key_ev}, {"$set": {"processed": True, "result": "unknown_track"}})
+        return Response("ok", status_code=200)
+    # Map OxaPay statuses
+    if status_raw in ("paid", "completed", "confirm", "confirmed", "success"):
+        mapped = "paid"
+    elif status_raw in ("waiting", "paying", "new", "pending", "confirming"):
+        mapped = "pending"
+    elif status_raw in ("expired", "failed", "cancel", "canceled", "refunded"):
+        mapped = "failed"
+    else:
+        mapped = "pending"
+    verified = {
+        "status": mapped,
+        "amount": payload.get("amount") or payload.get("payAmount"),
+        "currency": payload.get("currency") or payload.get("payCurrency"),
+        "order_number": order_id or pay.get("reference"),
+        "source_amount": payload.get("price") or payload.get("amount"),
+        "source_currency": (payload.get("currency") or settings.default_currency or "USD").upper(),
+    }
+    result = await apply_provider_state(pay, verified, "webhook")
+    await db()["webhook_events"].update_one(
+        {"event_key": key_ev},
+        {"$set": {"processed": result != "inconsistent", "result": result, "processed_at": utcnow()}},
+    )
+    return Response("ok", status_code=200)
+
+
 @api.post("/payments/plisio/webhook")
 async def plisio_webhook(request: Request) -> Response:
     """Plisio callback: verification is done via independent server-to-server call."""
@@ -2211,8 +2383,9 @@ async def wallet(user: dict = Depends(current_user)) -> dict:
 @api.post("/wallet/deposit", status_code=201)
 async def wallet_deposit(body: DepositIn, request: Request, user: dict = Depends(current_user)) -> dict:
     minor = money_to_minor(body.amount, "Amount", allow_zero=False)
-    if minor < settings.wallet_deposit_min_minor or minor > settings.wallet_deposit_max_minor:
-        raise HTTPException(422, f"Deposits must be between {minor_to_str(settings.wallet_deposit_min_minor)} and {minor_to_str(settings.wallet_deposit_max_minor)}")
+    dep_min = await runtime_deposit_min_minor()
+    if minor < dep_min or minor > settings.wallet_deposit_max_minor:
+        raise HTTPException(422, f"Deposits must be between {minor_to_str(dep_min)} and {minor_to_str(settings.wallet_deposit_max_minor)}")
     pay = await create_invoice(user, "DEP-" + secrets.token_hex(5).upper(), minor, "wallet_deposit", None, "Wallet top-up")
     await audit(request, "wallet.deposit_started", user["_id"], target=pay["reference"], category="payment")
     return {"payment_url": pay["payment_url"], "reference": pay["reference"]}
@@ -2631,65 +2804,95 @@ async def admin_bulk_cards(body: BulkCardsIn, request: Request, user: dict = Dep
             DeliveryIn(label="Country", value=code, kind="text"),
             DeliveryIn(label="Extra info", value=row.get("extra") or "—", kind="text"),
         ]
-        # Auto-fill required dynamic schema fields (e.g. card type CC/DC/MC)
+        # Auto-fill dynamic schema fields so storefront cards show BIN/exp/state/zip/brand/type/bank/base
         sf = await schema_fields_for(cat_id)
         auto_fields: dict = {}
-        # map network brand → common type codes used in schemas
+        bin6 = row["cc"][:6]
         brand_type = {
-            "Visa": "CC",
-            "Mastercard": "MC",
-            "Amex": "CC",
-            "Discover": "CC",
-            "JCB": "CC",
-            "Card": "CC",
-        }.get(brand, "CC")
+            "Visa": "CREDIT",
+            "Mastercard": "CREDIT",
+            "Amex": "CREDIT",
+            "Discover": "CREDIT",
+            "JCB": "CREDIT",
+            "Card": "CREDIT",
+        }.get(brand, "CREDIT")
+        # Prefer explicit keys that shop UI expects
+        explicit = {
+            "bin": bin6,
+            "cc": bin6,
+            "card_number": bin6,
+            "pan": bin6,
+            "expiry": row.get("exp") or "",
+            "exp": row.get("exp") or "",
+            "state": row.get("state") or "",
+            "zip": row.get("zip") or "",
+            "zipcode": row.get("zip") or "",
+            "city": row.get("city") or "",
+            "brand": brand,
+            "scheme": brand,
+            "network": brand,
+            "type": brand_type,
+            "card_type": brand_type,
+            "bank": (row.get("extra") or "").strip() or "",
+            "base": (body.subcategory or body.name_prefix or "Cards").strip()[:60],
+            "base_name": (body.subcategory or body.name_prefix or "Cards").strip()[:60],
+        }
         for key, fd in sf.items():
             label = (fd.get("label") or key or "").lower()
             ftype = fd.get("type")
             opts = list(fd.get("options") or [])
             default = fd.get("default")
             val = None
-            # card type / network dropdowns
-            if ftype in ("dropdown", "text", "variant") and (
-                any(x in label for x in ("type", "card type", "cc type", "network", "brand", "scheme"))
-                or ("cc" in label and "dc" in label)
-                or label.replace(" ", "") in ("cc,dc,mc", "cc/dc/mc", "cc|dc|mc")
-                or set(str(o).upper() for o in opts) >= {"CC", "DC", "MC"}
-            ):
-                # prefer exact option match
-                for candidate in (brand_type, brand, "CC", "MC", "DC", "Visa", "Mastercard"):
+            kl = key.lower()
+            if kl in explicit and explicit[kl] not in (None, ""):
+                val = explicit[kl]
+            elif any(x in label for x in ("bin", "first 6", "first six")) or kl in ("bin", "bin6"):
+                val = bin6
+            elif any(x in label for x in ("cc", "card number", "pan", "card no")) and "type" not in label:
+                val = bin6
+            elif any(x in label for x in ("expir", "exp date", "mm/yy", "mm-yy")):
+                val = row.get("exp") or ""
+            elif "state" in label or kl == "state":
+                val = row.get("state") or ""
+            elif "zip" in label or "postal" in label or kl in ("zip", "zipcode", "postal_code"):
+                val = row.get("zip") or ""
+            elif "city" in label or kl == "city":
+                val = row.get("city") or ""
+            elif any(x in label for x in ("brand", "scheme", "network")) or kl in ("brand", "scheme", "network"):
+                val = brand
+            elif any(x in label for x in ("type", "card type", "cc type")) or kl in ("type", "card_type"):
+                # map to option if dropdown
+                for candidate in (brand_type, "CREDIT", "DEBIT", brand, "CC", "MC", "Visa", "Mastercard"):
                     if opts and candidate in opts:
                         val = candidate
                         break
-                    if not opts:
-                        val = brand_type
-                        break
-                if val is None and opts:
-                    # last resort: first option that looks like a card type
-                    for o in opts:
-                        if str(o).upper() in ("CC", "DC", "MC", "VISA", "MASTERCARD", "AMEX"):
-                            val = o
-                            break
-                    if val is None:
-                        val = opts[0]
+                if val is None:
+                    val = brand_type if not opts else (opts[0] if opts else brand_type)
+            elif "bank" in label or kl == "bank":
+                val = (row.get("extra") or "").strip() or ""
+            elif "base" in label or kl in ("base", "base_name", "batch"):
+                val = (body.subcategory or body.name_prefix or "Cards").strip()[:60]
             elif ftype == "country" and fd.get("required"):
                 val = code
             elif default not in (None, ""):
                 val = default
             elif fd.get("required"):
                 if ftype == "dropdown" and opts:
-                    # pick CC if present else first
-                    val = next((o for o in opts if str(o).upper() in ("CC", "MC", "DC")), opts[0])
+                    val = next((o for o in opts if str(o).upper() in ("CC", "MC", "DC", "CREDIT", "DEBIT")), opts[0])
                 elif ftype in ("text", "variant", "region"):
-                    val = brand_type if any(x in label for x in ("type", "cc", "card")) else brand
+                    val = brand
                 elif ftype == "boolean":
                     val = False
                 elif ftype in ("number", "stock"):
                     val = 0
                 elif ftype == "decimal":
                     val = "0.00"
-            if val is not None:
+            if val is not None and val != "":
                 auto_fields[key] = val
+        # Always persist core display keys even if schema is empty/missing
+        for k, v in explicit.items():
+            if v not in (None, "") and k not in auto_fields:
+                auto_fields[k] = v
 
         pin = ProductIn(
             name=title,
@@ -3277,6 +3480,14 @@ async def admin_settings_get(user: dict = Depends(staff)) -> dict:
     else:
         out["plisio_api_key_set"] = bool(settings.plisio_api_key)
         out["plisio_api_key"] = "********" if settings.plisio_api_key else ""
+    if out.get("oxapay_api_key"):
+        out["oxapay_api_key_set"] = True
+        out["oxapay_api_key"] = "********"
+    else:
+        out["oxapay_api_key_set"] = bool(settings.oxapay_api_key)
+        out["oxapay_api_key"] = "********" if settings.oxapay_api_key else ""
+    if out.get("wallet_deposit_min_minor") is None:
+        out["wallet_deposit_min_minor"] = settings.wallet_deposit_min_minor
     return {"settings": out}
 
 
@@ -3303,6 +3514,17 @@ async def admin_settings_save(body: SiteIn, request: Request, user: dict = Depen
             upd.pop("plisio_api_key", None)
         else:
             upd["plisio_api_key"] = key
+    if "oxapay_api_key" in upd:
+        key = sec.clean_text(upd["oxapay_api_key"] or "", 200)
+        if key in ("", "********", "unchanged"):
+            upd.pop("oxapay_api_key", None)
+        else:
+            upd["oxapay_api_key"] = key
+    if "wallet_deposit_min_minor" in upd and upd["wallet_deposit_min_minor"] is not None:
+        try:
+            upd["wallet_deposit_min_minor"] = max(100, min(int(upd["wallet_deposit_min_minor"]), 10_000_000))
+        except (TypeError, ValueError):
+            upd.pop("wallet_deposit_min_minor", None)
     for k in ("mastercard_logo_url", "visa_logo_url"):
         if upd.get(k):
             try:

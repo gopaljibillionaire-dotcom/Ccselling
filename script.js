@@ -125,15 +125,28 @@ function maskBin(text) {
   if (d.length >= 6) return d.slice(0, 6) + "******";
   return text || "";
 }
+function fieldVal(p, re) {
+  const fields = p.fields || [];
+  const hit = fields.find((f) => re.test(f.label || "") || re.test(f.key || ""));
+  if (!hit) return "";
+  const v = Array.isArray(hit.value) ? hit.value[0] : hit.value;
+  return v == null ? "" : String(v);
+}
 function productCard(p) {
   const href = "#/p/" + encodeURIComponent(p.slug);
   const one = p.variants && p.variants.length === 1;
   const cardFields = (p.fields || []).filter((f) => f.card);
   const binish = cardFields.find((f) => /cc|card|number|bin|pan/i.test(f.label || "")) || (p.fields || []).find((f) => /bin|cc|pan|card.?number/i.test(f.label || "") || /bin|pan|cc/i.test(f.key || ""));
-  const bin = binish ? maskBin(Array.isArray(binish.value) ? binish.value[0] : String(binish.value || "")) : (p.name || "").replace(/\D/g, "").slice(0, 6);
-  const bName = brandNameOf(p);
+  let bin = binish ? maskBin(Array.isArray(binish.value) ? binish.value[0] : String(binish.value || "")) : "";
+  if (!bin || bin === "••••••") bin = maskBin(fieldVal(p, /bin|cc|pan|card.?number/i)) || (p.name || "").replace(/\D/g, "").slice(0, 6);
+  const exp = fieldVal(p, /expir|exp|mm\/?yy/i) || "—";
+  const state = fieldVal(p, /^state$|state/i) || "—";
+  const zip = fieldVal(p, /zip|postal/i) || "—";
+  const bank = fieldVal(p, /bank|issuer/i) || "—";
+  const base = fieldVal(p, /base/i) || p.base || p.subcategory || "—";
+  const bName = brandNameOf(p) || fieldVal(p, /brand|scheme|network/i);
   const brand = brandLogo(bName) || brandLogo(p.name) || brandLogo(p.subcategory) || brandLogo((p.category && p.category.name) || "");
-  const ctype = cardTypeLabel(p);
+  const ctype = cardTypeLabel(p) || fieldVal(p, /type|credit|debit/i) || "—";
   const buy = () => one ? buyNow(p, p.variants[0].sku, 1) : (location.hash = href);
   const countryCell = h("div", { class: "td-country" },
     countryFlag(p.country) || h("span", { class: "flag-fallback" }, (p.country && p.country.code) || "—"),
@@ -144,6 +157,9 @@ function productCard(p) {
       h("div", { class: "bin mono" }, bin || "••••••"),
       h("div", { class: "td-brand" }, brand || h("span", { class: "muted small" }, bName || "—")),
       h("div", { class: "td-type" }, h("span", { class: "card-type-chip" }, ctype)),
+      h("div", { class: "td-meta small muted" }, exp + " · " + state + " · " + zip),
+      h("div", { class: "td-bank small" }, bank),
+      h("div", { class: "td-base small mono" }, base),
       h("div", { class: "price td-price" }, money(p.final_price_minor)),
       h("div", { class: "actions" },
         h("button", { class: "btn sm", type: "button", disabled: !p.in_stock, onclick: guard(() => {
@@ -420,7 +436,7 @@ function newsletterForm() {
 async function shopView(q) {
   const f = { q: q.get("q") || "", country: q.get("country") || state.country || "", category: q.get("category") || "", min_price: q.get("min_price") || "", max_price: q.get("max_price") || "", availability: q.get("availability") || "", sort: q.get("sort") || (q.get("q") ? "relevance" : "newest") };
   const dyn = {}; for (const [k, v] of q.entries()) if (k.startsWith("f_")) dyn[k] = v;
-  const root = h("div"); const tableHead = h("div", { class: "shop-table-head" }, h("span", null, "Country"), h("span", null, "BIN"), h("span", null, "Brand"), h("span", null, "Type"), h("span", null, "Price"), h("span", null, "")); const grid = h("div"); const more = h("div", { class: "row", style: "justify-content:center;margin:16px 0" }); let page = 1; let total = 0;
+  const root = h("div"); const tableHead = h("div", { class: "shop-table-head" }, h("span", null, "Country"), h("span", null, "BIN"), h("span", null, "Brand"), h("span", null, "Type"), h("span", null, "Exp / State / ZIP"), h("span", null, "Bank"), h("span", null, "Base"), h("span", null, "Price"), h("span", null, "")); const grid = h("div"); const more = h("div", { class: "row", style: "justify-content:center;margin:16px 0" }); let page = 1; let total = 0;
   const push = (patch) => { const n = new URLSearchParams(); const merged = { ...f, ...dyn, ...patch }; for (const [k, v] of Object.entries(merged)) if (v) n.set(k, v); location.hash = "#/shop?" + n.toString(); };
   const sel = (id, opts, val, onchange) => { const s = h("select", { id, onchange: (e) => onchange(e.target.value) }, opts.map(([v, l]) => h("option", { value: v, selected: v === val }, l))); return s; };
   const catSel = sel("f_cat", [["", "All categories"], ...state.categories.map((c) => [c.id, (c.parent_id ? "— " : "") + c.name])], f.category, (v) => push({ category: v }));
@@ -431,11 +447,13 @@ async function shopView(q) {
     h("div", { class: "field" }, h("label", null, "Price range"), h("div", { class: "row" }, min, max)),
     /* availability filter removed — unique items, no stock UI */
     h("div", { class: "row" }, h("button", { class: "btn primary sm grow", type: "button", onclick: () => push({ min_price: min.value, max_price: max.value }) }, "Apply"), h("button", { class: "btn sm grow", type: "button", onclick: () => { location.hash = "#/shop"; } }, "Clear all")));
+  const baseIn = h("input", { id: "f_base", type: "text", maxlength: 60, placeholder: "Base name filter", value: f.base || "", onchange: (e) => push({ base: e.target.value }) });
+  filters.insertBefore(h("div", { class: "field" }, h("label", { for: "f_base" }, "Base"), baseIn), filters.lastChild);
   try { const sc = await api("/schemas/public" + (f.category ? `?category_id=${f.category}` : "")); for (const fl of sc.filters) { const cur = dyn["f_" + fl.key] || ""; const inp = fl.options.length ? sel("fd_" + fl.key, [["", "Any"], ...fl.options.map((o) => [o, o])], cur, (v) => push({ ["f_" + fl.key]: v })) : h("input", { id: "fd_" + fl.key, type: "text", maxlength: 100, value: cur, onchange: (e) => push({ ["f_" + fl.key]: e.target.value }) }); filters.insertBefore(h("div", { class: "field" }, h("label", { for: "fd_" + fl.key }, fl.label), inp), filters.lastChild); } } catch { /* filters optional */ }
   const head = h("div", { class: "row between wrap" }, h("h1", null, f.q ? `Results for “${f.q}”` : "Shop"), h("div", { class: "row" },
     h("label", { class: "sr-only", for: "f_sort" }, "Sort"), sel("f_sort", [["relevance", "Relevance"], ["newest", "Newest"], ["popularity", "Popularity"], ["price_asc", "Price: low to high"], ["price_desc", "Price: high to low"]], f.sort, (v) => push({ sort: v }))));
   async function load() {
-    const p = new URLSearchParams({ page: String(page), limit: "12", sort: f.sort }); for (const k of ["q", "country", "category", "min_price", "max_price", "availability"]) if (f[k]) p.set(k, f[k]); for (const [k, v] of Object.entries(dyn)) p.set(k, v);
+    const p = new URLSearchParams({ page: String(page), limit: "12", sort: f.sort }); for (const k of ["q", "country", "category", "base", "min_price", "max_price", "availability"]) if (f[k]) p.set(k, f[k]); for (const [k, v] of Object.entries(dyn)) p.set(k, v);
     const r = await api("/products?" + p.toString()); total = r.total;
     if (page === 1) { clear(grid); grid.className = "grid products tableish"; if (!r.items.length) { grid.className = ""; grid.append(empty("No products match these filters.", h("a", { class: "btn", href: "#/shop" }, "Clear all filters"))); } }
     r.items.forEach((i) => grid.append(productCard(i))); clear(more);
@@ -509,7 +527,7 @@ async function cartView() {
     h("div", { class: "stack" }, h("div", { class: "qty" }, h("button", { type: "button", "aria-label": "Decrease", onclick: guard(async () => { await setQty(i.product_id, i.sku, i.qty - 1); route(); }) }, "−"), h("output", null, String(i.qty)), h("button", { type: "button", "aria-label": "Increase", onclick: guard(async () => { await setQty(i.product_id, i.sku, Math.min(20, i.qty + 1)); route(); }) }, "+")),
       h("button", { class: "btn sm danger", type: "button", onclick: guard(async () => { await setQty(i.product_id, i.sku, 0); route(); }) }, "Remove"))));
   const totals = h("div", { class: "panel stack" }, h("h3", null, "Order summary"), ...[["Subtotal", c.subtotal_minor], c.member_discount_minor ? ["Member discount", -c.member_discount_minor] : null, c.tax_minor ? ["Tax", c.tax_minor] : null].filter(Boolean).map(([l, v]) => h("div", { class: "row between" }, h("span", { class: "muted" }, l), h("span", null, money(v)))), h("div", { class: "row between price" }, h("span", null, "Total"), h("span", null, money(c.total_minor))),
-    h("fieldset", { style: "border:0;padding:0;margin:0" }, h("legend", { class: "small muted" }, "Payment method"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", checked: true, onchange: () => (method.v = "plisio") }), "Cryptocurrency (secure hosted checkout)"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", onchange: () => (method.v = "wallet") }), "Wallet balance")), err,
+    h("fieldset", { style: "border:0;padding:0;margin:0" }, h("legend", { class: "small muted" }, "Payment method"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", checked: true, onchange: () => (method.v = "oxapay") }), "Cryptocurrency (OxaPay)"), h("label", { class: "check" }, h("input", { type: "radio", name: "pm", onchange: () => (method.v = "wallet") }), "Wallet balance")), err,
     h("button", { class: "btn primary", type: "button", id: "payBtn", onclick: async (e) => { e.currentTarget.disabled = true; err.textContent = ""; try { const r = await api("/checkout", { method: "POST", body: { payment_method: method.v }, headers: { "Idempotency-Key": idemKey() } }); state.cart = null; updateCartBadge(); finishCheckout(r.order); } catch (x) { err.textContent = x.message; e.currentTarget.disabled = false; } } }, "Place order & pay"),
     h("p", { class: "small muted" }, "Your order is confirmed only after the payment provider verifies your payment with our server."));
   return h("div", { class: "stack" }, h("div", { class: "row between" }, h("h1", null, "Your cart"), h("button", { class: "btn sm danger", type: "button", onclick: guard(async () => { await api("/cart", { method: "DELETE" }); state.cart = null; updateCartBadge(); route(); }) }, "Clear cart")), ...(c.problems && c.problems.length ? [h("div", { class: "panel error-text", role: "alert" }, c.problems.join(" · "))] : []), h("div", { class: "shop", style: "grid-template-columns:1fr" }, h("div", { class: "stack" }, lines), totals));

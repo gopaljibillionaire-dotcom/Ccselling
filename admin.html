@@ -762,6 +762,7 @@ async function bulkCardsForm() {
   const statusSel = h("select", null, ["draft", "published"].map((x) => h("option", { value: x }, x)));
   const defCountry = h("select", null, st.countries.map((c) => h("option", { value: c.code, selected: c.code === "US" }, c.name)));
   const useAi = h("input", { type: "checkbox", checked: true });
+  const baseName = h("input", { placeholder: "Base name e.g. 11.05.26_90%VR or $1 cards", maxlength: 60 });
   const namePrefix = h("input", { type: "text", value: "Card", maxlength: 40 });
   const tags = h("input", { type: "text", value: "card, bulk", placeholder: "comma tags" });
   const imgUrl = h("input", { type: "url", placeholder: "https://i.ibb.co/…/card.jpg (optional shared image)" });
@@ -782,7 +783,7 @@ async function bulkCardsForm() {
       field("Subcategory", sub),
       field("Status", statusSel),
       field("Default country (fallback)", defCountry),
-      field("Name prefix", namePrefix),
+      field("Base name (filterable batch)", baseName), field("Name prefix", namePrefix),
       field("Tags", tags)
     ),
     field("Shared image URL (ImgBB)", imgUrl),
@@ -805,6 +806,7 @@ async function bulkCardsForm() {
             status: statusSel.value,
             default_country: defCountry.value || "US",
             name_prefix: namePrefix.value || "Card",
+            subcategory: (baseName && baseName.value) ? baseName.value : (namePrefix.value || "Cards"),
             tags: tags.value.split(",").map((t) => t.trim()).filter(Boolean),
             use_ai: !!useAi.checked,
             images: imgUrl.value.trim() ? [{ url: imgUrl.value.trim(), alt: "card" }] : [],
@@ -1135,6 +1137,9 @@ VIEWS.settings = async () => {
   const inv = h("input", { type: "checkbox", checked: !!r.invite_only });
   const plisioKey = h("input", { type: "password", value: r.plisio_api_key || "", placeholder: r.plisio_api_key_set ? "•••••••• (leave blank to keep)" : "Paste Plisio API key", autocomplete: "off" });
   const plisioSand = h("input", { type: "checkbox", checked: !!r.plisio_sandbox });
+  const oxaKey = h("input", { type: "password", value: r.oxapay_api_key || "", placeholder: r.oxapay_api_key_set ? "•••••••• (leave blank to keep)" : "Paste OxaPay merchant API key", autocomplete: "off" });
+  const oxaSand = h("input", { type: "checkbox", checked: !!r.oxapay_sandbox });
+  const depMin = h("input", { type: "number", min: "1", step: "0.01", value: ((r.wallet_deposit_min_minor != null ? r.wallet_deposit_min_minor : 3900) / 100).toFixed(2) });
   const mcLogo = h("input", { type: "url", value: r.mastercard_logo_url || "", placeholder: "https://i.ibb.co/.../mastercard.png" });
   const visaLogo = h("input", { type: "url", value: r.visa_logo_url || "", placeholder: "https://i.ibb.co/.../visa.png" });
 
@@ -1183,10 +1188,13 @@ VIEWS.settings = async () => {
       h("label", { class: "row" }, dispOn, "Enable custom display numbers"),
       h("div", { class: "grid" }, dispFields.map(([k, l]) => field(l, disp[k])))
     ),
-    h("div", { class: "panel" }, h("h3", null, "Plisio payments"), h("p", { class: "muted small" }, "Change the API key any time — the wallet/merchant on Plisio switches immediately for new invoices."), field("Plisio API key", plisioKey), h("label", { class: "row" }, plisioSand, "Sandbox mode"), field("Mastercard logo URL (legacy)", mcLogo), field("Visa logo URL (legacy)", visaLogo)),
+    h("div", { class: "panel" }, h("h3", null, "OxaPay payments"), h("p", { class: "muted small" }, "Primary crypto checkout. Paste your OxaPay merchant API key. Webhook path: /api/payments/oxapay/webhook"), field("OxaPay API key", oxaKey), h("label", { class: "row" }, oxaSand, "Sandbox mode"), field("Minimum wallet deposit (USD)", depMin), h("p", { class: "muted small" }, "Lower this so small top-ups are allowed (e.g. 5.00).")),
+    h("div", { class: "panel" }, h("h3", null, "Plisio (legacy fallback)"), h("p", { class: "muted small" }, "Only used if OxaPay key is empty."), field("Plisio API key", plisioKey), h("label", { class: "row" }, plisioSand, "Sandbox mode"), field("Mastercard logo URL (legacy)", mcLogo), field("Visa logo URL (legacy)", visaLogo)),
     h("div", { class: "panel" }, h("h3", null, "Card brands"), h("p", { class: "muted small" }, "Add network brands with their logo. When a product brand/subcategory matches a name (Visa, Mastercard, Amex…), the logo shows on the shop table."), brandBox),
     isAdmin() ? h("button", { class: "btn primary", type: "button", onclick: go(async () => {
-      const body = { invite_only: inv.checked, plisio_sandbox: plisioSand.checked, display_stats_enabled: dispOn.checked };
+      const body = { invite_only: inv.checked, plisio_sandbox: plisioSand.checked, oxapay_sandbox: oxaSand.checked, display_stats_enabled: dispOn.checked };
+      const depVal = Number(depMin.value);
+      if (!Number.isNaN(depVal) && depVal > 0) body.wallet_deposit_min_minor = Math.round(depVal * 100);
       for (const [k] of keys) {
         const v = ins[k].value.trim();
         if (["tax_rate_bps", "points_per_unit"].includes(k)) { if (v !== "") body[k] = Number(v); }
@@ -1199,6 +1207,8 @@ VIEWS.settings = async () => {
       }
       const pk = plisioKey.value.trim();
       if (pk && pk !== "********") body.plisio_api_key = pk;
+      const ok = oxaKey.value.trim();
+      if (ok && ok !== "********") body.oxapay_api_key = ok;
       if (mcLogo.value.trim()) body.mastercard_logo_url = mcLogo.value.trim();
       if (visaLogo.value.trim()) body.visa_logo_url = visaLogo.value.trim();
       body.brands = brandRows.filter((b) => (b.name || "").trim()).map((b) => ({ name: b.name.trim(), logo_url: (b.logo_url || "").trim() }));

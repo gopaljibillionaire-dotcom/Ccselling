@@ -104,10 +104,14 @@ class Settings:
     # Timeout (seconds) applied to all outbound HTTP calls (Plisio, ImgBB).
     outbound_timeout_seconds: int = field(default_factory=lambda: _int("OUTBOUND_TIMEOUT_SECONDS", 15))
 
-    # --- Plisio (https://plisio.net/documentation) ---------------------------
+    # --- Plisio (legacy; prefer OxaPay) -------------------------------------
     plisio_api_key: str = field(default_factory=lambda: _env("PLISIO_API_KEY"))
     plisio_base_url: str = field(default_factory=lambda: _env("PLISIO_BASE_URL", "https://api.plisio.net/api/v1").rstrip("/"))
     plisio_sandbox: bool = field(default_factory=lambda: _bool("PLISIO_SANDBOX", True))
+    # --- OxaPay (https://docs.oxapay.com) -----------------------------------
+    oxapay_api_key: str = field(default_factory=lambda: _env("OXAPAY_API_KEY") or _env("OXAPAY_MERCHANT_KEY"))
+    oxapay_base_url: str = field(default_factory=lambda: _env("OXAPAY_BASE_URL", "https://api.oxapay.com").rstrip("/"))
+    oxapay_sandbox: bool = field(default_factory=lambda: _bool("OXAPAY_SANDBOX", False))
     checkout_reservation_minutes: int = field(default_factory=lambda: _int("CHECKOUT_RESERVATION_MINUTES", 65))
 
     # --- Wallet --------------------------------------------------------------
@@ -137,6 +141,14 @@ class Settings:
     @property
     def plisio_enabled(self) -> bool:
         return bool(self.plisio_api_key)
+
+    @property
+    def oxapay_enabled(self) -> bool:
+        return bool(self.oxapay_api_key)
+
+    @property
+    def payments_enabled(self) -> bool:
+        return bool(self.oxapay_api_key or self.plisio_api_key)
 
     @property
     def imgbb_enabled(self) -> bool:
